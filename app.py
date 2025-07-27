@@ -247,7 +247,7 @@ if not st.session_state.logged_in:
             if players.empty:
                 st.info("Noch keine Spieler angelegt.")
             else:
-                login_name = st.selectbox("Spieler")
+                login_name = st.selectbox("Spieler", Name)
                 login_pin = st.text_input("PIN", type="password")
                 if st.button("Einloggen"):
                     stored_pin = players.loc[players["Name"] == login_name, "Pin"].iat[0]
