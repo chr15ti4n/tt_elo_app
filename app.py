@@ -8,7 +8,7 @@ import bcrypt
 import qrcode  # QR-Code generation
 
 # region Admins
-ADMINS = {"Chris"}  # Spieler‑Namen mit Admin-Rechten
+ADMINS = {"Chris"}
 # endregion
 
 # region Paths
@@ -18,13 +18,13 @@ MATCHES = Path("matches.csv")
 PENDING = Path("pending_matches.csv")
 PENDING_D = Path("pending_doubles.csv")
 DOUBLES   = Path("doubles.csv")
-PENDING_R = Path("pending_rounds.csv")   # Rundlauf: wartet auf Bestätigung
+PENDING_R = Path("pending_rounds.csv")  
+ROUNDS    = Path("rounds.csv")          
 # endregion
 
 # ---------- QR-Code für Schnellzugriff ----------
-ROUNDS    = Path("rounds.csv")           # bestätigte Rundläufe
 QR_FILE = Path("form_qr.png")
-APP_URL  = "https://tt-elo.streamlit.app/?view=spiel"  # bei Bedarf anpassen
+APP_URL  = "https://tt-elo.streamlit.app"
 if not QR_FILE.exists():
     qr_img = qrcode.make(APP_URL)
     qr_img.save(QR_FILE)
@@ -247,7 +247,7 @@ if not st.session_state.logged_in:
             if players.empty:
                 st.info("Noch keine Spieler angelegt.")
             else:
-                login_name = st.selectbox("Spieler", players["Name"])
+                login_name = st.selectbox("Spieler")
                 login_pin = st.text_input("PIN", type="password")
                 if st.button("Einloggen"):
                     stored_pin = players.loc[players["Name"] == login_name, "Pin"].iat[0]
