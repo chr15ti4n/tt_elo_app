@@ -480,10 +480,10 @@ if st.session_state.view_mode == "doppel":
         st.info("Mindestens vier Spieler registrieren.")
     else:
         c = st.columns(4)
-        a1 = c[0].selectbox("A1", players.Name, key="d_a1")
-        a2 = c[1].selectbox("A2", players[players.Name != a1].Name, key="d_a2")
-        b1 = c[2].selectbox("B1", players[~players.Name.isin([a1,a2])].Name, key="d_b1")
-        b2 = c[3].selectbox("B2", players[~players.Name.isin([a1,a2,b1])].Name, key="d_b2")
+        a1 = c[0].selectbox("A1", players.Name, index=None, placeholder="Spieler wählen", key="d_a1")
+        a2 = c[1].selectbox("A2", players[players.Name != a1].Name, index=None, placeholder="Spieler wählen", key="d_a2")
+        b1 = c[2].selectbox("B1", players[~players.Name.isin([a1,a2])].Name, index=None, placeholder="Spieler wählen", key="d_b1")
+        b2 = c[3].selectbox("B2", players[~players.Name.isin([a1,a2,b1])].Name, index=None, placeholder="Spieler wählen", key="d_b2")
         pA = st.number_input("Punkte A", 0, 21, 11, key="d_pA")
         pB = st.number_input("Punkte B", 0, 21, 8, key="d_pB")
         if st.button("Doppel speichern"):
@@ -565,7 +565,8 @@ if st.session_state.view_mode == "spiel":
     else:
         st.markdown(f"**Eingeloggt als:** {current_player}")
         pa = st.number_input("Punkte (dein Ergebnis)", 0, 21, 11)
-        b = st.selectbox("Gegner wählen", players[players["Name"] != current_player]["Name"])
+        b = st.selectbox("Gegner wählen", players[players["Name"] != current_player]["Name"],
+                         index=None, placeholder="Spieler wählen")
         pb = st.number_input("Punkte Gegner", 0, 21, 8)
         if st.button("Match speichern"):
             if current_player == b:
@@ -665,9 +666,12 @@ if st.session_state.view_mode == "round":
     else:
         # --- Finalisten‑Auswahl & Speichern nur wenn >=3 Teilnehmer ---
         fin_cols = st.columns(2)
-        fin1 = fin_cols[0].selectbox("Finalist 1", selected, key="r_f1")
-        fin2 = fin_cols[1].selectbox("Finalist 2", [p for p in selected if p != fin1], key="r_f2")
-        sieger = st.selectbox("Sieger (muss Finalist sein)", [fin1, fin2], key="r_win")
+        fin1 = fin_cols[0].selectbox("Finalist 1", selected, index=None, placeholder="Spieler wählen", key="r_f1")
+        fin2 = fin_cols[1].selectbox("Finalist 2", [p for p in selected if p != fin1],
+                                     index=None, placeholder="Spieler wählen", key="r_f2")
+        sieger_options = [p for p in (fin1, fin2) if p is not None]
+        sieger = st.selectbox("Sieger (muss Finalist sein)", sieger_options,
+                              index=None, placeholder="Sieger wählen", key="r_win")
 
         if st.button("Rundlauf speichern"):
             new_row = {
