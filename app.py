@@ -149,6 +149,9 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "current_player" not in st.session_state:
     st.session_state.current_player = None
+# View mode: "spiel" (default) or "regeln"
+if "view_mode" not in st.session_state:
+    st.session_state.view_mode = "spiel"
 
 if not st.session_state.logged_in:
     with st.sidebar:  # Login‑UI nur solange nicht eingeloggt
@@ -192,11 +195,21 @@ if not st.session_state.logged_in:
                     save_csv(players, PLAYERS)
                     st.success(f"{reg_name} angelegt. Jetzt einloggen.")
                     st.rerun()
+# Eingeloggt: Sidebar zeigt Menü und Logout
 else:
-    # Eingeloggt: Sidebar zeigt nur Logout und aktuellen User
     with st.sidebar:
         st.markdown(f"**Eingeloggt als:** {st.session_state.current_player}")
-        if st.button("Logout"):
+
+        if st.button("🏓 Einzelmatch", use_container_width=True):
+            st.session_state.view_mode = "spiel"
+            st.rerun()
+
+        if st.button("📜 Regeln", use_container_width=True):
+            st.session_state.view_mode = "regeln"
+            st.rerun()
+
+
+        if st.button("🚪 Logout", use_container_width=True):
             st.session_state.logged_in = False
             st.session_state.current_player = None
             st.rerun()
@@ -204,7 +217,69 @@ else:
 if not st.session_state.logged_in:
     st.stop()
 
+
 current_player = st.session_state.current_player
+
+# Regel-Ansicht
+if st.session_state.view_mode == "regeln":
+    rules_html = """
+    <style>
+    .rulebox {font-size:18px; line-height:1.45;}
+    .rulebox h2 {font-size:24px; margin:1.2em 0 .5em;}
+    .rulebox h3 {font-size:20px; margin:1.0em 0 .3em;}
+    .rulebox ul {margin:0 0 1em 1.3em; list-style:disc;}
+    </style>
+
+    <div class="rulebox">
+
+    <h2>Einzelmatch</h2>
+
+    <h3>1.&nbsp;Spielziel:</h3>
+    <p>Wer zuerst 11&nbsp;Punkte (mit mindestens&nbsp;2 Punkten Vorsprung) erreicht, gewinnt das Match.</p>
+
+    <h3>2.&nbsp;Aufschlag&nbsp;&amp;&nbsp;Rückschlag:</h3>
+    <p>
+    Der Aufschlag beginnt offen (sichtbar) und wird vom eigenen Spielfeld auf das gegnerische Feld gespielt.<br>
+    Der Ball muss dabei einmal auf der eigenen Seite und dann einmal auf der gegnerischen Seite aufkommen.<br>
+    Nach dem Aufschlag erfolgt der Rückschlag: Der Ball wird direkt auf die gegnerische Seite geschlagen
+    (nicht mehr auf der eigenen aufkommen lassen).
+    </p>
+
+    <h3>3.&nbsp;Rallye:</h3>
+    <p>
+    Nach dem Aufschlag wechseln sich die Spieler ab.<br>
+    Der Ball darf maximal einmal aufspringen, muss über oder um das Netz geschlagen werden.<br>
+    Berührt der Ball das Netz beim Rückschlag, aber landet korrekt, wird weitergespielt.<br>
+    Beim Aufschlag hingegen führt Netzberührung bei korrektem Verlauf zu einem „Let“ (Wiederholung des Aufschlags).
+    </p>
+
+    <h3>4.&nbsp;Punktevergabe:</h3>
+    <ul>
+      <li>Aufschlagfehler (z.&nbsp;B. Ball landet nicht auf gegnerischer Seite)</li>
+      <li>Ball verfehlt</li>
+      <li>Ball springt zweimal auf der eigenen Seite</li>
+      <li>Rückschlag landet außerhalb oder im Netz</li>
+      <li>Ball wird vor dem Aufspringen, aber über der Tischfläche getroffen</li>
+      <li>Netz oder Tisch wird mit der Hand oder dem Körper berührt</li>
+    </ul>
+
+    <h3>5.&nbsp;Aufschlagwechsel:</h3>
+    <p>
+    Alle&nbsp;2 Punkte wird der Aufschlag gewechselt.<br>
+    Bei 10&nbsp;:&nbsp;10 wird nach jedem Punkt der Aufschlag gewechselt
+    (bis einer 2&nbsp;Punkte Vorsprung hat).
+    </p>
+
+    <h3>6.&nbsp;Seitenwechsel:</h3>
+    <p>
+    Nach jedem Satz werden die Seiten gewechselt.<br>
+    Im Entscheidungssatz (z.&nbsp;B. 5.&nbsp;Satz bei 3&nbsp;:&nbsp;2) zusätzlich bei 5 Punkten.
+    </p>
+
+    </div>
+    """
+    st.markdown(rules_html, unsafe_allow_html=True)
+    st.stop()
 
 
 
