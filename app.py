@@ -1,11 +1,17 @@
+# region Imports
 import streamlit as st
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
-from zoneinfo import ZoneInfo  # Python ≥ 3.9
-import matplotlib.pyplot as plt
+from zoneinfo import ZoneInfo 
 import bcrypt
+import qrcode  # QR-Code generation
 
+# region Admins
+ADMINS = {"Chris"}  # Spieler‑Namen mit Admin-Rechten
+# endregion
+
+# region Paths
 # ---------- Konstante Pfade ----------
 PLAYERS = Path("players.csv")
 MATCHES = Path("matches.csv")
@@ -13,13 +19,19 @@ PENDING = Path("pending_matches.csv")
 PENDING_D = Path("pending_doubles.csv")
 DOUBLES   = Path("doubles.csv")
 PENDING_R = Path("pending_rounds.csv")   # Rundlauf: wartet auf Bestätigung
-ROUNDS    = Path("rounds.csv")           # bestätigte Rundläufe
+# endregion
 
+# ---------- QR-Code für Schnellzugriff ----------
+ROUNDS    = Path("rounds.csv")           # bestätigte Rundläufe
+QR_FILE = Path("form_qr.png")
+APP_URL  = "https://tt-elo.streamlit.app/?view=spiel"  # bei Bedarf anpassen
+if not QR_FILE.exists():
+    qr_img = qrcode.make(APP_URL)
+    qr_img.save(QR_FILE)
+# endregion
+
+# region Helper Functions
 # ---------- Hilfsfunktionen ----------
-def load_csv(path, cols):
-    if path.exists():
-        return pd.read_csv(path)
-    return pd.DataFrame(columns=cols)
 
 def save_csv(df, path):
     df.to_csv(path, index=False)
@@ -33,7 +45,9 @@ def calc_elo(r_a, r_b, score_a, k=32):
     """Klassische ELO-Formel (1 = Sieg, 0 = Niederlage)"""
     exp_a = 1 / (1 + 10 ** ((r_b - r_a) / 400))
     return round(r_a + k * (score_a - exp_a), 0)
+# endregion
 
+# region PIN Hashing
 # ---------- PIN-Hashing ----------
 def hash_pin(pin: str) -> str:
     return bcrypt.hashpw(pin.encode(), bcrypt.gensalt()).decode()
@@ -49,7 +63,9 @@ def check_pin(pin: str, stored: str) -> bool:
     else:
         # Legacy: Klartext
         return pin == stored
+# endregion
 
+# region Rebuild Players (Einzel)
 # ---------- Spieler-Stats & ELO komplett neu berechnen ----------
 def rebuild_players(players_df: pd.DataFrame, matches_df: pd.DataFrame, k: int = 32) -> pd.DataFrame:
     """
@@ -97,47 +113,15 @@ def rebuild_players(players_df: pd.DataFrame, matches_df: pd.DataFrame, k: int =
             players_df.loc[players_df["Name"] == b, "Spiele"].iat[0] + 1,
         ]
     return players_df
+# endregion
 
+# region Doppel ELO Helper
 # ---------- Doppel-ELO ----------
 def calc_doppel_elo(r1, r2, opp_avg, s, k=24):
     team_avg = (r1 + r2) / 2
     exp = 1 / (1 + 10 ** ((opp_avg - team_avg) / 400))
     delta = k * (s - exp)
     return round(r1 + delta), round(r2 + delta)
-
-# ---------- ELO‑Verlauf für einen Spieler ----------
-def elo_history(player: str, matches_df: pd.DataFrame, k: int = 32) -> list[tuple[pd.Timestamp, int]]:
-    """
-    Gibt eine Liste (Datum, Elo) für den angegebenen Spieler zurück.
-    Die Berechnung läuft chronologisch über alle Matches.
-    """
-    ratings: dict[str, int] = {}
-    history: list[tuple[pd.Timestamp, int]] = []
-    matches_sorted = matches_df.sort_values("Datum")
-    for _, row in matches_sorted.iterrows():
-        a, b = row["A"], row["B"]
-        pa, pb = int(row["PunkteA"]), int(row["PunkteB"])
-
-        # Ratings initialisieren, falls Spieler noch nicht bekannt
-        ratings.setdefault(a, 1200)
-        ratings.setdefault(b, 1200)
-
-        ra, rb = ratings[a], ratings[b]
-        score_a = 1 if pa > pb else 0
-        score_b = 1 - score_a
-
-        new_ra = calc_elo(ra, rb, score_a, k)
-        new_rb = calc_elo(rb, ra, score_b, k)
-
-        ratings[a] = new_ra
-        ratings[b] = new_rb
-
-        if a == player:
-            history.append((row["Datum"], new_ra))
-        elif b == player:
-            history.append((row["Datum"], new_rb))
-
-    return history
 
 # ---------- Daten laden ----------
 players = load_or_create(PLAYERS, ["Name", "ELO", "Siege", "Niederlagen", "Spiele", "Pin"])
@@ -172,8 +156,9 @@ for df in (matches, pending, pending_d, doubles, pending_r, rounds):
             pd.to_datetime(df["Datum"], utc=True, errors="coerce")
               .dt.tz_convert("Europe/Berlin")
         )
+# endregion
 
-
+# region Doppel ELO Rebuild
 # ---------- Doppel-Stats & ELO komplett neu berechnen ----------
 def rebuild_players_d(players_df, doubles_df, k=24):
     players_df = players_df.copy()
@@ -199,7 +184,9 @@ def rebuild_players_d(players_df, doubles_df, k=24):
                 players_df.loc[players_df.Name==p,"D_Spiele"].iat[0] + 1,
             ]
     return players_df
+# endregion
 
+# region Rundlauf ELO
 # ---------- Rundlauf-ELO ----------
 def calc_round_elo(r, avg, s, k=24):
     """
@@ -236,8 +223,10 @@ def rebuild_players_r(players_df, rounds_df, k=24):
             players_df.loc[players_df.Name==p,"R_ELO"] = new
             players_df.loc[players_df.Name==p,"R_Spiele"] += 1
     return players_df
+# endregion
 
 
+# region Auth & Sidebar UI
 # ---------- Login / Registrierung ----------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -304,9 +293,9 @@ if not st.session_state.logged_in:
 # Eingeloggt: Sidebar zeigt Menü und Logout
 else:
     with st.sidebar:
-        st.markdown(f"**Eingeloggt als:** {st.session_state.current_player}")
+        current_player = st.session_state.current_player  # lokal verfügbar
+        st.markdown(f"**Eingeloggt als:** {current_player}")
 
-# Rundlauf Sidebar-Button
         if st.button("🏓 Einzelmatch", use_container_width=True):
             st.session_state.view_mode = "spiel"
             st.rerun()
@@ -327,14 +316,108 @@ else:
             st.session_state.logged_in = False
             st.session_state.current_player = None
             st.rerun()
+        
+        # QR-Code für Match-Eintrag
+        with st.expander("📱 QR-Code"):
+            st.image(str(QR_FILE), width=180)
+            st.caption("Scanne, um zu spielen 🏓.")
+
+        # Account löschen (Selbstlöschung)
+        with st.expander("🗑️ Account löschen"):
+            st.warning("Dies löscht deinen Spieler‑Eintrag **dauerhaft** inklusive aller zugehörigen Spiele!")
+            confirm = st.checkbox("Ich bin mir absolut sicher.")
+            if st.button("Account unwiderruflich löschen") and confirm:
+                # Spieler aus players entfernen
+                players = players[players["Name"] != current_player]
+
+                # Helferfunktion: Zeilen entfernen, in denen Name auftaucht
+                def drop_rows(df: pd.DataFrame, cols: list[str]):
+                    if df.empty:
+                        return df
+                    mask = df[cols].astype(str).eq(current_player).any(axis=1)
+                    return df[~mask]
+
+                # Einzel
+                matches   = drop_rows(matches,   ["A", "B"])
+                pending   = drop_rows(pending,   ["A", "B"])
+
+                # Doppel
+                doubles    = drop_rows(doubles,    ["A1","A2","B1","B2"])
+                pending_d  = drop_rows(pending_d,  ["A1","A2","B1","B2"])
+
+                # Rundlauf
+                if not rounds.empty:
+                    rounds = rounds[~rounds["Teilnehmer"].str.contains(current_player)]
+                if not pending_r.empty:
+                    pending_r = pending_r[~pending_r["Teilnehmer"].str.contains(current_player)]
+
+                # Elo neu berechnen
+                players = rebuild_players(players, matches)
+                players = rebuild_players_d(players, doubles)
+                players = rebuild_players_r(players, rounds)
+
+                # CSV speichern
+                save_csv(players,   PLAYERS)
+                save_csv(matches,   MATCHES)
+                save_csv(pending,   PENDING)
+                save_csv(doubles,   DOUBLES)
+                save_csv(pending_d, PENDING_D)
+                save_csv(rounds,    ROUNDS)
+                save_csv(pending_r, PENDING_R)
+
+                st.success("Account und alle zugehörigen Daten wurden gelöscht.")
+                st.session_state.logged_in = False
+                st.session_state.current_player = None
+                st.rerun()
+
+        # Admin‑Tools (nur für Admins sichtbar)
+        if current_player in ADMINS:
+            with st.expander("⚙️ Admin"):
+                st.write("Eintrag auswählen und entfernen – ELO wird automatisch neu berechnet.")
+                mode = st.selectbox("Typ", ["Einzel", "Doppel", "Rundlauf"])
+                if mode == "Einzel" and not matches.empty:
+                    idx = st.number_input("Index (Einzel)", 0, len(matches)-1, step=1)
+                elif mode == "Doppel" and not doubles.empty:
+                    idx = st.number_input("Index (Doppel)", 0, len(doubles)-1, step=1)
+                elif mode == "Rundlauf" and not rounds.empty:
+                    idx = st.number_input("Index (Rundlauf)", 0, len(rounds)-1, step=1)
+                else:
+                    st.info("Keine Einträge vorhanden.")
+                    idx = None
+
+                if st.button("Löschen") and idx is not None:
+                    if mode == "Einzel":
+                        matches.drop(idx, inplace=True)
+                        matches.reset_index(drop=True, inplace=True)
+                        players_updated = rebuild_players(players, matches)
+                        players.update(players_updated)
+                        save_csv(matches, MATCHES)
+                    elif mode == "Doppel":
+                        doubles.drop(idx, inplace=True)
+                        doubles.reset_index(drop=True, inplace=True)
+                        players_updated = rebuild_players_d(players, doubles)
+                        players.update(players_updated)
+                        save_csv(doubles, DOUBLES)
+                    elif mode == "Rundlauf":
+                        rounds.drop(idx, inplace=True)
+                        rounds.reset_index(drop=True, inplace=True)
+                        players_updated = rebuild_players_r(players, rounds)
+                        players.update(players_updated)
+                        save_csv(rounds, ROUNDS)
+
+                    save_csv(players, PLAYERS)
+                    st.success(f"{mode}-Eintrag Nr. {idx} gelöscht und Elo neu berechnet.")
+                    st.rerun()
+
 # Login erforderlich, um fortzufahren
 if not st.session_state.logged_in:
     st.stop()
-
+#
+# endregion
 
 current_player = st.session_state.current_player
 
-# Regel-Ansicht
+# region Regel Ansicht
 if st.session_state.view_mode == "regeln":
     rules_html = """
     <style>
@@ -470,10 +553,9 @@ if st.session_state.view_mode == "regeln":
     """
     st.markdown(rules_html, unsafe_allow_html=True)
     st.stop()
+# endregion
 
-
-
-# Doppel-Ansicht
+# region Doppel Ansicht
 if st.session_state.view_mode == "doppel":
     st.title("Doppelmatch eintragen")
     if len(players) < 4:
@@ -552,8 +634,9 @@ if st.session_state.view_mode == "doppel":
         recent_d_display = recent_d[["Datum", "A1", "A2", "B1", "B2", "PunkteA", "PunkteB"]]
         st.dataframe(recent_d_display)
     st.stop()
+# endregion
 
-
+# region Einzel Ansicht
 # Zeige den folgenden Block nur im Einzel‑Modus
 if st.session_state.view_mode == "spiel":
     # ---------- Match erfassen ----------
@@ -654,7 +737,9 @@ if st.session_state.view_mode == "spiel":
         recent_display = recent.copy()
         recent_display["Datum"] = recent_display["Datum"].dt.strftime("%d.%m.%Y")
         st.dataframe(recent_display)
+# endregion
 
+# region Rundlauf Ansicht
 # Rundlauf‑Ansicht
 if st.session_state.view_mode == "round":
     st.title("Rundlauf eintragen")
@@ -753,3 +838,4 @@ if st.session_state.view_mode == "round":
         recent_r_display = recent_r[["Datum", "Sieger", "Finalist1", "Finalist2", "Teilnehmer"]]
         st.dataframe(recent_r_display)
     st.stop()
+# endregion
