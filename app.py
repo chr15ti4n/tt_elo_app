@@ -10,6 +10,10 @@ import bcrypt
 PLAYERS = Path("players.csv")
 MATCHES = Path("matches.csv")
 PENDING = Path("pending_matches.csv")
+PENDING_D = Path("pending_doubles.csv")
+DOUBLES   = Path("doubles.csv")
+PENDING_R = Path("pending_rounds.csv")   # Rundlauf: wartet auf Bestätigung
+ROUNDS    = Path("rounds.csv")           # bestätigte Rundläufe
 
 # ---------- Hilfsfunktionen ----------
 def load_csv(path, cols):
@@ -94,6 +98,13 @@ def rebuild_players(players_df: pd.DataFrame, matches_df: pd.DataFrame, k: int =
         ]
     return players_df
 
+# ---------- Doppel-ELO ----------
+def calc_doppel_elo(r1, r2, opp_avg, s, k=24):
+    team_avg = (r1 + r2) / 2
+    exp = 1 / (1 + 10 ** ((opp_avg - team_avg) / 400))
+    delta = k * (s - exp)
+    return round(r1 + delta), round(r2 + delta)
+
 # ---------- ELO‑Verlauf für einen Spieler ----------
 def elo_history(player: str, matches_df: pd.DataFrame, k: int = 32) -> list[tuple[pd.Timestamp, int]]:
     """
@@ -133,15 +144,98 @@ players = load_or_create(PLAYERS, ["Name", "ELO", "Siege", "Niederlagen", "Spiel
 # Falls alte CSV noch keine Pin‑Spalte hatte
 if "Pin" not in players.columns:
     players["Pin"] = ""
+# Doppel-Spalten ergänzen
+for col in ["D_ELO", "D_Siege", "D_Niederlagen", "D_Spiele"]:
+    if col not in players.columns:
+        players[col] = 1200 if col == "D_ELO" else 0
+# Rundlauf-Spalten ergänzen
+for col in ["R_ELO", "R_Siege", "R_Zweite", "R_Niederlagen", "R_Spiele"]:
+    if col not in players.columns:
+        players[col] = 1200 if col == "R_ELO" else 0
 
 matches = load_or_create(MATCHES, ["Datum", "A", "B", "PunkteA", "PunkteB"])
 pending = load_or_create(PENDING, ["Datum", "A", "B", "PunkteA", "PunkteB", "confA", "confB"])
-for df in (matches, pending):
+pending_d = load_or_create(PENDING_D, ["Datum","A1","A2","B1","B2","PunkteA","PunkteB","confA","confB"])
+doubles   = load_or_create(DOUBLES,   ["Datum","A1","A2","B1","B2","PunkteA","PunkteB"])
+pending_r = load_or_create(PENDING_R, ["Datum","Teilnehmer","Finalist1","Finalist2","Sieger","creator","confirmed_by"])
+# -- Kompatibilität älterer CSV-Versionen --
+if "confirmed_by" not in pending_r.columns:
+    if "conf" in pending_r.columns:
+        pending_r = pending_r.rename(columns={"conf": "confirmed_by"})
+    else:
+        pending_r["confirmed_by"] = ""
+    save_csv(pending_r, PENDING_R)
+rounds    = load_or_create(ROUNDS,    ["Datum","Teilnehmer","Finalist1","Finalist2","Sieger"])
+for df in (matches, pending, pending_d, doubles, pending_r, rounds):
     if not df.empty:
         df["Datum"] = (
             pd.to_datetime(df["Datum"], utc=True, errors="coerce")
               .dt.tz_convert("Europe/Berlin")
         )
+
+
+# ---------- Doppel-Stats & ELO komplett neu berechnen ----------
+def rebuild_players_d(players_df, doubles_df, k=24):
+    players_df = players_df.copy()
+    players_df[["D_ELO","D_Siege","D_Niederlagen","D_Spiele"]] = 0
+    players_df["D_ELO"] = 1200
+    for _, row in doubles_df.sort_values("Datum").iterrows():
+        a1,a2,b1,b2 = row[["A1","A2","B1","B2"]]
+        pa,pb = int(row["PunkteA"]), int(row["PunkteB"])
+        ra1 = players_df.loc[players_df.Name==a1,"D_ELO"].iat[0]
+        ra2 = players_df.loc[players_df.Name==a2,"D_ELO"].iat[0]
+        rb1 = players_df.loc[players_df.Name==b1,"D_ELO"].iat[0]
+        rb2 = players_df.loc[players_df.Name==b2,"D_ELO"].iat[0]
+        a_avg,b_avg = (ra1+ra2)/2, (rb1+rb2)/2
+        score_a = 1 if pa>pb else 0
+        nr1,nr2 = calc_doppel_elo(ra1,ra2,b_avg,score_a,k)
+        nr3,nr4 = calc_doppel_elo(rb1,rb2,a_avg,1-score_a,k)
+        updates = [(a1,nr1,score_a),(a2,nr2,score_a),(b1,nr3,1-score_a),(b2,nr4,1-score_a)]
+        for p,new,s in updates:
+            players_df.loc[players_df.Name==p, ["D_ELO","D_Siege","D_Niederlagen","D_Spiele"]] = [
+                new,
+                players_df.loc[players_df.Name==p,"D_Siege"].iat[0] + (1 if s==1 else 0),
+                players_df.loc[players_df.Name==p,"D_Niederlagen"].iat[0] + (1 if s==0 else 0),
+                players_df.loc[players_df.Name==p,"D_Spiele"].iat[0] + 1,
+            ]
+    return players_df
+
+# ---------- Rundlauf-ELO ----------
+def calc_round_elo(r, avg, s, k=24):
+    """
+    r      ... Rating des Spielers
+    avg    ... Durchschnittsrating aller Teilnehmer
+    s      ... Ergebnis (1 Sieger, 0.5 Zweiter, 0 Verlierer)
+    """
+    exp = 1 / (1 + 10 ** ((avg - r) / 400))
+    return round(r + k * (s - exp))
+
+# ---------- Rundlauf-Stats & ELO komplett neu berechnen ----------
+def rebuild_players_r(players_df, rounds_df, k=24):
+    players_df = players_df.copy()
+    players_df[["R_ELO","R_Siege","R_Zweite","R_Niederlagen","R_Spiele"]] = 0
+    players_df["R_ELO"] = 1200
+    if rounds_df.empty:
+        return players_df
+    for _, row in rounds_df.sort_values("Datum").iterrows():
+        teilnehmer = row["Teilnehmer"].split(";")
+        fin1, fin2, winner = row["Finalist1"], row["Finalist2"], row["Sieger"]
+        avg = players_df.loc[players_df.Name.isin(teilnehmer), "R_ELO"].mean()
+        for p in teilnehmer:
+            old = players_df.loc[players_df.Name==p,"R_ELO"].iat[0]
+            if p == winner:
+                s = 1
+                players_df.loc[players_df.Name==p,"R_Siege"] += 1
+            elif p in (fin1, fin2):
+                s = 0.5   # Finalist (2. Platz) erhält halben Sieg‑Wert
+                players_df.loc[players_df.Name==p,"R_Zweite"] += 1
+            else:
+                s = 0
+                players_df.loc[players_df.Name==p,"R_Niederlagen"] += 1
+            new = calc_round_elo(old, avg, s, k)
+            players_df.loc[players_df.Name==p,"R_ELO"] = new
+            players_df.loc[players_df.Name==p,"R_Spiele"] += 1
+    return players_df
 
 
 # ---------- Login / Registrierung ----------
@@ -191,7 +285,19 @@ if not st.session_state.logged_in:
                 elif reg_name in players["Name"].values:
                     st.warning("Spieler existiert bereits.")
                 else:
-                    players.loc[len(players)] = [reg_name, 1200, 0, 0, 0, hash_pin(reg_pin1)]
+                    new_player = {
+                        "Name": reg_name,
+                        "ELO": 1200,
+                        "Siege": 0,
+                        "Niederlagen": 0,
+                        "Spiele": 0,
+                        "Pin": hash_pin(reg_pin1),
+                        "D_ELO": 1200,
+                        "D_Siege": 0,
+                        "D_Niederlagen": 0,
+                        "D_Spiele": 0,
+                    }
+                    players = pd.concat([players, pd.DataFrame([new_player])], ignore_index=True)
                     save_csv(players, PLAYERS)
                     st.success(f"{reg_name} angelegt. Jetzt einloggen.")
                     st.rerun()
@@ -200,14 +306,22 @@ else:
     with st.sidebar:
         st.markdown(f"**Eingeloggt als:** {st.session_state.current_player}")
 
+# Rundlauf Sidebar-Button
         if st.button("🏓 Einzelmatch", use_container_width=True):
             st.session_state.view_mode = "spiel"
+            st.rerun()
+
+        if st.button("🤝 Doppel", use_container_width=True):
+            st.session_state.view_mode = "doppel"
+            st.rerun()
+
+        if st.button("🔄 Rundlauf", use_container_width=True):
+            st.session_state.view_mode = "round"
             st.rerun()
 
         if st.button("📜 Regeln", use_container_width=True):
             st.session_state.view_mode = "regeln"
             st.rerun()
-
 
         if st.button("🚪 Logout", use_container_width=True):
             st.session_state.logged_in = False
@@ -277,118 +391,361 @@ if st.session_state.view_mode == "regeln":
     </p>
 
     </div>
+
+    <div class="rulebox">
+
+    <h2>Doppelmatch</h2>
+
+    <h3>1.&nbsp;Spielziel:</h3>
+    <p>Wie beim Einzel gilt: 11&nbsp;Punkte mit mindestens 2 Punkten Vorsprung.</p>
+
+    <h3>2.&nbsp;Aufschlag&nbsp;&amp;&nbsp;Rückschlag:</h3>
+    <p>
+    Aufschlag erfolgt immer diagonal von der rechten Hälfte zur rechten Hälfte des Gegners.<br>
+    Reihenfolge: A1 schlägt auf B1 auf, dann B1 auf A2, dann A2 auf B2, dann B2 auf A1 usw.
+    </p>
+
+    <h3>3.&nbsp;Schlagreihenfolge:</h3>
+    <p>
+    Innerhalb eines Ballwechsels muss sich jedes Team beim Schlagen abwechseln.<br>
+    Es darf also nicht zweimal hintereinander vom selben Spieler eines Teams gespielt werden.
+    </p>
+
+    <h3>4.&nbsp;Punktevergabe:</h3>
+    <p>Fehler führen wie im Einzelspiel zu einem Punkt für das gegnerische Team:</p>
+    <ul>
+      <li>Aufschlagfehler (z.&nbsp;B. falsches Feld, Netz)</li>
+      <li>Ball ins Aus oder ins Netz</li>
+      <li>Fehlerhafte Reihenfolge beim Schlagen</li>
+      <li>Berührung von Netz oder Tisch mit dem Körper</li>
+    </ul>
+
+    <h3>5.&nbsp;Aufschlagwechsel:</h3>
+    <p>
+    Der Aufschlag wechselt alle 2 Punkte – dabei ändert sich auch die Reihenfolge der Spieler.<br>
+    Nach jedem Satz rotiert die Reihenfolge, sodass jeder mal mit jedem spielt.
+    </p>
+
+    <h3>6.&nbsp;Seitenwechsel:</h3>
+    <p>Wie im Einzel: Nach jedem Satz und bei 5 Punkten im letzten Satz.</p>
+
+    </div>
+
+    <div class="rulebox">
+
+    <h2>Rundlauf</h2>
+
+    <h3>1.&nbsp;Spielprinzip:</h3>
+    <p>
+    Alle Spieler laufen im Kreis um den Tisch. Jeder darf nur einen Schlag ausführen und muss danach sofort weiterlaufen.<br>
+    Wer einen Fehler macht, verliert ein Leben.
+    </p>
+
+    <h3>2.&nbsp;Leben &amp; Ausscheiden:</h3>
+    <p>
+    Jeder Spieler startet mit <strong>3 Leben</strong>. Wer keine Leben mehr hat, scheidet aus.<br>
+    Der erste Spieler, der ausscheidet, bekommt automatisch einen <strong>„Schwimmer“</strong> (ein zusätzliches Leben) und darf wieder mitspielen.
+    </p>
+
+    <h3>3.&nbsp;Finalrunde:</h3>
+    <p>
+    Wenn nur noch zwei Spieler übrig sind, beginnt das <strong>Finale</strong>.<br>
+    Es wird auf Punkte gespielt: <strong>Bis 3 Punkte mit mindestens 2 Punkten Abstand</strong>.
+    </p>
+
+    <h3>4.&nbsp;Aufschlag im Finale:</h3>
+    <p>
+    Im Finale wechselt der Aufschlag nach jedem Punkt. Es wird ganz normal mit einem regulären Aufschlag begonnen.
+    </p>
+
+    <h3>5.&nbsp;Fehlerquellen:</h3>
+    <ul>
+      <li>Ball im Netz oder im Aus</li>
+      <li>Ball springt nicht auf gegnerischer Seite</li>
+      <li>Doppelberührung oder Schlag vor dem Aufspringen</li>
+      <li>Zu spät am Tisch (wenn Ball schon 2× aufspringt oder Mitspieler warten muss)</li>
+    </ul>
+
+    </div>
     """
     st.markdown(rules_html, unsafe_allow_html=True)
     st.stop()
 
 
 
-# ---------- Match erfassen ----------
-st.title("AK-Tischtennis")
-st.subheader("Match eintragen")
-
-if len(players) < 2:
-    st.info("Mindestens zwei Spieler registrieren, um ein Match anzulegen.")
-else:
-    st.markdown(f"**Eingeloggt als:** {current_player}")
-    pa = st.number_input("Punkte (dein Ergebnis)", 0, 21, 11)
-    b = st.selectbox("Gegner wählen", players[players["Name"] != current_player]["Name"])
-    pb = st.number_input("Punkte Gegner", 0, 21, 8)
-    if st.button("Match speichern"):
-        if current_player == b:
-            st.error("Spieler dürfen nicht identisch sein.")
-        else:
-            ts_now = datetime.now(ZoneInfo("Europe/Berlin"))
-            pending.loc[len(pending)] = [
-                ts_now, current_player, b, pa, pb,
-                True,  # confA (du)
-                False  # confB
-            ]
-            save_csv(pending, PENDING)
-            st.success("Match gespeichert! Es wartet jetzt auf Bestätigung des Gegners.")
-
-
-# ---------- Offene Matches bestätigen ----------
-with st.expander("Offene Matches bestätigen"):
-    to_confirm = pending[
-        ((pending["A"] == current_player) & (pending["confA"] == False)) |
-        ((pending["B"] == current_player) & (pending["confB"] == False))
-    ]
-    if to_confirm.empty:
-        st.info("Keine offenen Matches für dich.")
+# Doppel-Ansicht
+if st.session_state.view_mode == "doppel":
+    st.title("Doppelmatch eintragen")
+    if len(players) < 4:
+        st.info("Mindestens vier Spieler registrieren.")
     else:
-        for idx, row in to_confirm.iterrows():
-            match_text = (f"{row['A']} {row['PunkteA']} : {row['PunkteB']} {row['B']}  "
-                          f"({row['Datum'].strftime('%d.%m.%Y %H:%M')})")
-            st.write(match_text)
+        c = st.columns(4)
+        a1 = c[0].selectbox("A1", players.Name, key="d_a1")
+        a2 = c[1].selectbox("A2", players[players.Name != a1].Name, key="d_a2")
+        b1 = c[2].selectbox("B1", players[~players.Name.isin([a1,a2])].Name, key="d_b1")
+        b2 = c[3].selectbox("B2", players[~players.Name.isin([a1,a2,b1])].Name, key="d_b2")
+        pA = st.number_input("Punkte A", 0, 21, 11, key="d_pA")
+        pB = st.number_input("Punkte B", 0, 21, 8, key="d_pB")
+        if st.button("Doppel speichern"):
+            pending_d.loc[len(pending_d)] = [
+                datetime.now(ZoneInfo("Europe/Berlin")), a1, a2, b1, b2, pA, pB, True, False
+            ]
+            save_csv(pending_d, PENDING_D)
+            st.success("Doppel gespeichert – wartet auf Bestätigung.")
 
-            col_ok, col_rej = st.columns(2)
-            with col_ok:
-                if st.button("Bestätigen", key=f"conf_{idx}"):
-                    if row["A"] == current_player:
-                        pending.at[idx, "confA"] = True
-                    else:
-                        pending.at[idx, "confB"] = True
-                    # Wenn beide bestätigt, Match finalisieren
-                    if pending.at[idx, "confA"] and pending.at[idx, "confB"]:
-                        matches = pd.concat(
-                            [matches,
-                             pending.loc[[idx], ["Datum","A","B","PunkteA","PunkteB"]]],
+    # Bestätigungs‑Expander
+    with st.expander("Offene Doppel"):
+        to_conf = pending_d[((pending_d.A1==current_player)|(pending_d.A2==current_player)) & (~pending_d.confA) |
+                            ((pending_d.B1==current_player)|(pending_d.B2==current_player)) & (~pending_d.confB)]
+        if to_conf.empty:
+            st.info("Keine offenen Doppel")
+        else:
+            for idx,row in to_conf.iterrows():
+                st.write(f"{row.A1}&{row.A2}  {row.PunkteA}:{row.PunkteB}  {row.B1}&{row.B2}")
+                col1,col2 = st.columns(2)
+                if col1.button("Bestätigen", key=f"d_ok_{idx}"):
+                    pending_d.at[idx, "confA" if current_player in (row.A1,row.A2) else "confB"] = True
+                    if pending_d.at[idx,"confA"] and pending_d.at[idx,"confB"]:
+                        doubles = pd.concat(
+                            [doubles, pending_d.loc[[idx], pending_d.columns[:-2]]],
                             ignore_index=True
                         )
-                        pending.drop(idx, inplace=True)
-                        players = rebuild_players(players, matches)
-                        save_csv(matches, MATCHES)
-                    save_csv(pending, PENDING)
+                        pending_d.drop(idx, inplace=True)
+                        players = rebuild_players_d(players, doubles)
+                        save_csv(doubles, DOUBLES)
+                    save_csv(pending_d, PENDING_D)
                     save_csv(players, PLAYERS)
                     st.rerun()
-
-            with col_rej:
-                if st.button("Ablehnen", key=f"rej_{idx}"):
-                    # Einfach aus der Pending-Liste entfernen, keine ELO-Anpassung
-                    pending.drop(idx, inplace=True)
-                    save_csv(pending, PENDING)
-                    st.success("Match abgelehnt und entfernt.")
+                if col2.button("Ablehnen", key=f"d_no_{idx}"):
+                    pending_d.drop(idx, inplace=True)
+                    save_csv(pending_d, PENDING_D)
                     st.rerun()
 
-
-# ---------- Leaderboard anzeigen ----------
-
-# ---------- Leaderboard anzeigen ----------
-st.subheader("Leaderboard")
-st.dataframe(
-    players.drop(columns=["Pin"], errors="ignore")
-           .sort_values("ELO", ascending=False)
-           .reset_index(drop=True)
-)
-
-# ---------- ELO‑Verlauf Plot ----------
-with st.expander("Mein ELO‑Verlauf", expanded=True):
-    player_matches = matches[(matches["A"] == current_player) | (matches["B"] == current_player)]
-    if player_matches.empty:
-        st.info("Für dich existieren noch keine bestätigten Matches.")
-    else:
-        hist = elo_history(current_player, matches)
-        elos = [e for _, e in hist]
-        x_vals = list(range(1, len(elos) + 1))  # 1, 2, 3, ...
-        plt.figure()
-        plt.plot(x_vals, elos, marker="o")
-        plt.xlabel("Match‑Nr.")
-        plt.ylabel("ELO")
-        plt.title(f"ELO‑Verlauf von {current_player}")
-        plt.xticks(x_vals)  # jede Match‑Nr. anzeigen
-        st.pyplot(plt)
-
-# ---------- Letzte 5 Matches ----------
-st.subheader("Letzte 5 Matches")
-if matches.empty:
-    st.info("Noch keine Spiele eingetragen.")
-else:
-    recent = (
-        matches.sort_values("Datum", ascending=False)
-        .head(5)
+    st.subheader("Doppel-Leaderboard")
+    d_leader = (
+        players[players["D_Spiele"] > 0][["Name","D_ELO","D_Siege","D_Niederlagen","D_Spiele"]]
+        .rename(columns={
+            "D_ELO": "ELO",
+            "D_Siege": "Siege",
+            "D_Niederlagen": "Niederlagen",
+            "D_Spiele": "Spiele",
+        })
+        .sort_values("ELO", ascending=False)
         .reset_index(drop=True)
     )
-    recent_display = recent.copy()
-    recent_display["Datum"] = recent_display["Datum"].dt.strftime("%d.%m.%Y")
-    st.dataframe(recent_display)
+    if d_leader.empty:
+        st.info("Noch keine bestätigten Doppelmatches.")
+    else:
+        st.dataframe(d_leader)
+
+    # ---------- Letzte 5 Doppelmatches ----------
+    st.subheader("Letzte 5 Doppelmatches")
+    if doubles.empty:
+        st.info("Noch keine Doppelmatches eingetragen.")
+    else:
+        recent_d = (
+            doubles.sort_values("Datum", ascending=False)
+                   .head(5)
+                   .reset_index(drop=True)
+        )
+        recent_d["Datum"] = recent_d["Datum"].dt.strftime("%d.%m.%Y")
+        recent_d_display = recent_d[["Datum", "A1", "A2", "B1", "B2", "PunkteA", "PunkteB"]]
+        st.dataframe(recent_d_display)
+    st.stop()
+
+
+# Zeige den folgenden Block nur im Einzel‑Modus
+if st.session_state.view_mode == "spiel":
+    # ---------- Match erfassen ----------
+    st.title("AK-Tischtennis")
+    st.subheader("Match eintragen")
+
+    if len(players) < 2:
+        st.info("Mindestens zwei Spieler registrieren, um ein Match anzulegen.")
+    else:
+        st.markdown(f"**Eingeloggt als:** {current_player}")
+        pa = st.number_input("Punkte (dein Ergebnis)", 0, 21, 11)
+        b = st.selectbox("Gegner wählen", players[players["Name"] != current_player]["Name"])
+        pb = st.number_input("Punkte Gegner", 0, 21, 8)
+        if st.button("Match speichern"):
+            if current_player == b:
+                st.error("Spieler dürfen nicht identisch sein.")
+            else:
+                ts_now = datetime.now(ZoneInfo("Europe/Berlin"))
+                pending.loc[len(pending)] = [
+                    ts_now, current_player, b, pa, pb,
+                    True,  # confA (du)
+                    False  # confB
+                ]
+                save_csv(pending, PENDING)
+                st.success("Match gespeichert! Es wartet jetzt auf Bestätigung des Gegners.")
+
+
+    # ---------- Offene Matches bestätigen ----------
+    with st.expander("Offene Matches bestätigen"):
+        to_confirm = pending[
+            ((pending["A"] == current_player) & (pending["confA"] == False)) |
+            ((pending["B"] == current_player) & (pending["confB"] == False))
+        ]
+        if to_confirm.empty:
+            st.info("Keine offenen Matches für dich.")
+        else:
+            for idx, row in to_confirm.iterrows():
+                match_text = (f"{row['A']} {row['PunkteA']} : {row['PunkteB']} {row['B']}  "
+                              f"({row['Datum'].strftime('%d.%m.%Y %H:%M')})")
+                st.write(match_text)
+
+                col_ok, col_rej = st.columns(2)
+                with col_ok:
+                    if st.button("Bestätigen", key=f"conf_{idx}"):
+                        if row["A"] == current_player:
+                            pending.at[idx, "confA"] = True
+                        else:
+                            pending.at[idx, "confB"] = True
+                        # Wenn beide bestätigt, Match finalisieren
+                        if pending.at[idx, "confA"] and pending.at[idx, "confB"]:
+                            matches = pd.concat(
+                                [matches,
+                                 pending.loc[[idx], ["Datum","A","B","PunkteA","PunkteB"]]],
+                                ignore_index=True
+                            )
+                            pending.drop(idx, inplace=True)
+                            players = rebuild_players(players, matches)
+                            save_csv(matches, MATCHES)
+                        save_csv(pending, PENDING)
+                        save_csv(players, PLAYERS)
+                        st.rerun()
+
+                with col_rej:
+                    if st.button("Ablehnen", key=f"rej_{idx}"):
+                        # Einfach aus der Pending-Liste entfernen, keine ELO-Anpassung
+                        pending.drop(idx, inplace=True)
+                        save_csv(pending, PENDING)
+                        st.success("Match abgelehnt und entfernt.")
+                        st.rerun()
+
+
+    # ---------- Leaderboard anzeigen ----------
+
+    # ---------- Leaderboard anzeigen ----------
+    st.subheader("Leaderboard")
+    ex_cols = ["Pin", "D_ELO", "D_Siege", "D_Niederlagen", "D_Spiele",
+               "R_ELO", "R_Siege", "R_Zweite", "R_Niederlagen", "R_Spiele"]
+    einzel_tbl = (players[players["Spiele"] > 0]                 # nur wer mind. 1 Einzel spielte
+                  .drop(columns=ex_cols, errors="ignore")
+                  .sort_values("ELO", ascending=False)
+                  .reset_index(drop=True))
+    if einzel_tbl.empty:
+        st.info("Noch keine bestätigten Einzelmatches.")
+    else:
+        st.dataframe(einzel_tbl)
+
+    # ---------- Letzte 5 Matches ----------
+    st.subheader("Letzte 5 Matches")
+    if matches.empty:
+        st.info("Noch keine Spiele eingetragen.")
+    else:
+        recent = (
+            matches.sort_values("Datum", ascending=False)
+            .head(5)
+            .reset_index(drop=True)
+        )
+        recent_display = recent.copy()
+        recent_display["Datum"] = recent_display["Datum"].dt.strftime("%d.%m.%Y")
+        st.dataframe(recent_display)
+
+# Rundlauf‑Ansicht
+if st.session_state.view_mode == "round":
+    st.title("Rundlauf eintragen")
+
+    # Teilnehmer wählen
+    selected = st.multiselect("Teilnehmer auswählen (mind. 3)", players["Name"])
+    if len(selected) < 3:
+        st.info("Mindestens drei Spieler auswählen.")
+    else:
+        # --- Finalisten‑Auswahl & Speichern nur wenn >=3 Teilnehmer ---
+        fin_cols = st.columns(2)
+        fin1 = fin_cols[0].selectbox("Finalist 1", selected, key="r_f1")
+        fin2 = fin_cols[1].selectbox("Finalist 2", [p for p in selected if p != fin1], key="r_f2")
+        sieger = st.selectbox("Sieger (muss Finalist sein)", [fin1, fin2], key="r_win")
+
+        if st.button("Rundlauf speichern"):
+            new_row = {
+                "Datum": datetime.now(ZoneInfo("Europe/Berlin")),
+                "Teilnehmer": ";".join(selected),
+                "Finalist1": fin1,
+                "Finalist2": fin2,
+                "Sieger": sieger,
+                "creator": current_player,
+                "confirmed_by": current_player  # Ersteller zählt sofort als bestätigt
+            }
+            pending_r = pd.concat([pending_r, pd.DataFrame([new_row])], ignore_index=True)
+            save_csv(pending_r, PENDING_R)
+            st.success("Rundlauf gespeichert – wartet auf Bestätigung eines Mitspielers.")
+
+    # Alte 'conf'-Spalte endgültig entfernen, falls noch vorhanden
+    if "conf" in pending_r.columns:
+        pending_r.drop(columns=["conf"], inplace=True)
+        save_csv(pending_r, PENDING_R)
+
+    # Bestätigung
+    with st.expander("Offene Rundläufe"):
+        to_c = pending_r[
+            (pending_r["Teilnehmer"].str.contains(current_player)) &
+            (~pending_r["confirmed_by"].str.contains(current_player))
+        ]
+        if to_c.empty:
+            st.info("Keine offenen Rundläufe für dich.")
+        else:
+            for idx,row in to_c.iterrows():
+                st.write(f"Teilnehmer: {row['Teilnehmer']}  – Sieger: {row['Sieger']}")
+                col1,col2 = st.columns(2)
+                if col1.button("Bestätigen ✅", key=f"r_ok_{idx}"):
+                    # Spieler in confirmed_by aufnehmen
+                    confirmed = pending_r.at[idx,"confirmed_by"].split(";")
+                    confirmed.append(current_player)
+                    pending_r.at[idx,"confirmed_by"] = ";".join(confirmed)
+
+                    # Finalisieren, wenn mind. 3 Bestätigende
+                    if len(confirmed) >= 3:
+                        rounds = pd.concat([rounds, pending_r.loc[[idx], rounds.columns]], ignore_index=True)
+                        pending_r.drop(idx, inplace=True)
+                        players = rebuild_players_r(players, rounds)
+                        save_csv(rounds, ROUNDS)
+                    save_csv(pending_r, PENDING_R)
+                    save_csv(players, PLAYERS)
+                    st.rerun()
+                if col2.button("Ablehnen ❌", key=f"r_no_{idx}"):
+                    pending_r.drop(idx,inplace=True)
+                    save_csv(pending_r, PENDING_R)
+                    st.rerun()
+
+    st.subheader("Rundlauf‑Leaderboard")
+    r_leader = (players[players["R_Spiele"] > 0][["Name","R_ELO","R_Siege","R_Zweite","R_Niederlagen","R_Spiele"]]
+                .rename(columns={
+                    "R_ELO":"ELO",
+                    "R_Siege":"Siege",
+                    "R_Zweite":"2. Platz",
+                    "R_Niederlagen":"Niederlagen",
+                    "R_Spiele":"Spiele"})
+                .sort_values("ELO", ascending=False)
+                .reset_index(drop=True))
+    if r_leader.empty:
+        st.info("Noch keine bestätigten Rundläufe.")
+    else:
+        st.dataframe(r_leader)
+
+    # ---------- Letzte 5 Rundläufe ----------
+    st.subheader("Letzte 5 Rundläufe")
+    if rounds.empty:
+        st.info("Noch keine Rundläufe eingetragen.")
+    else:
+        recent_r = (
+            rounds.sort_values("Datum", ascending=False)
+                  .head(5)
+                  .reset_index(drop=True)
+        )
+        recent_r["Datum"] = recent_r["Datum"].dt.strftime("%d.%m.%Y")
+        recent_r_display = recent_r[["Datum", "Sieger", "Finalist1", "Finalist2", "Teilnehmer"]]
+        st.dataframe(recent_r_display)
+    st.stop()
