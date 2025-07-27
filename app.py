@@ -209,7 +209,7 @@ current_player = st.session_state.current_player
 
 
 # ---------- Match erfassen ----------
-st.title("AK-Tischtennis Elo")
+st.title("AK-Tischtennis")
 st.subheader("Match eintragen")
 
 if len(players) < 2:
