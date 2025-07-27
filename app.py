@@ -254,6 +254,8 @@ if not st.session_state.logged_in:
                     placeholder="Name wählen"
                 )
                 login_pin = st.text_input("PIN", type="password")
+                if login_name is None:
+                    st.stop()
                 if st.button("Einloggen"):
                     stored_pin = players.loc[players["Name"] == login_name, "Pin"].iat[0]
                     if check_pin(login_pin, stored_pin):
