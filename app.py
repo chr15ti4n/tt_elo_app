@@ -424,6 +424,13 @@ else:
             st.rerun()
         
         if st.button("🔄 Aktualisieren", use_container_width=True):
+            # Cache leeren, damit neu aus Google‑Sheets geladen wird
+            if "dfs" in st.session_state:
+                st.session_state["dfs"].clear()
+            try:
+                _get_ws.cache_clear()   # Worksheet‑Cache leeren
+            except Exception:
+                pass
             st.rerun()
 
         # QR-Code für Match-Eintrag
