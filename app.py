@@ -124,7 +124,8 @@ def load_or_create(path: Path, cols: list[str]) -> pd.DataFrame:
         return df
 
 def calc_elo(r_a, r_b, score_a, k=32):
-    """Klassische ELO-Formel (1 = Sieg, 0 = Niederlage)"""
+    """ELO‑Formel mit Punktdifferenz.
+    score_a ∈ [0,1]   1 = 11:0   0.09 ≈ 11:10   0 = Niederlage"""
     exp_a = 1 / (1 + 10 ** ((r_b - r_a) / 400))
     return round(r_a + k * (score_a - exp_a), 0)
 # endregion
@@ -176,8 +177,11 @@ def rebuild_players(players_df: pd.DataFrame, matches_df: pd.DataFrame, k: int =
         r_a = players_df.loc[players_df["Name"] == a, "ELO"].iat[0]
         r_b = players_df.loc[players_df["Name"] == b, "ELO"].iat[0]
 
-        score_a = 1 if pa > pb else 0
-        score_b = 1 - score_a
+        if pa == pb:
+            continue  # Unentschieden ignorieren
+        margin = pa - pb
+        score_a = max(margin / 11, 0)            # 11:0 -> 1   11:10 -> 0.09
+        score_b = max(-margin / 11, 0)           # Gegenwert für Verlierer
 
         new_r_a = calc_elo(r_a, r_b, score_a, k)
         new_r_b = calc_elo(r_b, r_a, score_b, k)
@@ -254,7 +258,10 @@ def rebuild_players_d(players_df, doubles_df, k=24):
         rb1 = players_df.loc[players_df.Name==b1,"D_ELO"].iat[0]
         rb2 = players_df.loc[players_df.Name==b2,"D_ELO"].iat[0]
         a_avg,b_avg = (ra1+ra2)/2, (rb1+rb2)/2
-        score_a = 1 if pa>pb else 0
+        if pa == pb:
+            continue  # kein Unentschieden
+        margin = pa - pb
+        score_a = max(margin / 11, 0)
         nr1,nr2 = calc_doppel_elo(ra1,ra2,b_avg,score_a,k)
         nr3,nr4 = calc_doppel_elo(rb1,rb2,a_avg,1-score_a,k)
         updates = [(a1,nr1,score_a),(a2,nr2,score_a),(b1,nr3,1-score_a),(b2,nr4,1-score_a)]
