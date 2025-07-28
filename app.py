@@ -40,7 +40,6 @@ USE_GSHEETS = "gcp" in st.secrets  # Nur aktiv, wenn Service‑Account‑Creds h
 
 if USE_GSHEETS:
     gc = gspread.service_account_from_dict(st.secrets["gcp"])
-    sh = gc.open("tt_elo")  # Name des Google‑Sheets
     SHEET_NAMES = {
         "players.csv":  "players",
         "matches.csv":  "matches",
@@ -50,6 +49,20 @@ if USE_GSHEETS:
         "pending_rounds.csv": "pending_rounds",
         "rounds.csv":   "rounds",
     }
+    # Falls du lieber per ID öffnest, trage sie hier ein (leer = Name verwenden)
+    SPREAD_ID = st.secrets.get("spread_id", "")  # optional in secrets
+    try:
+        if SPREAD_ID:
+            sh = gc.open_by_key(SPREAD_ID)
+        else:
+            sh = gc.open("tt_elo")
+    except gspread.SpreadsheetNotFound:
+        # Fallback: Sheet erzeugen (im Drive des Service-Accounts)
+        sh = gc.create("tt_elo")
+        # Freigabe an deinen Google‑Account (falls vorhanden)
+        owner = st.secrets.get("owner_email")
+        if owner:
+            sh.share(owner, perm_type="user", role="writer")
 # endregion
 
 # region Helper Functions
