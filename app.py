@@ -423,7 +423,7 @@ else:
             st.query_params.clear()  # clear
             st.rerun()
         
-        if st.button("🔄 Aktualisieren", use_container_width=True):
+        if st.button("♻️ Aktualisieren", use_container_width=True):
             # Cache leeren, damit neu aus Google‑Sheets geladen wird
             if "dfs" in st.session_state:
                 st.session_state["dfs"].clear()
