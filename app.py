@@ -72,8 +72,13 @@ if USE_GSHEETS:
             return sh.add_worksheet(name, rows=1000, cols=len(cols))
 # endregion
 
+
 # region Helper Functions
 # ---------- Hilfsfunktionen ----------
+
+# --------- Session‑Cache für DataFrames (verhindert unnötige Sheets‑Reads) ---------
+if "dfs" not in st.session_state:   # Key: Path.name  |  Value: DataFrame
+    st.session_state["dfs"] = {}
 
 def save_csv(df: pd.DataFrame, path: Path):
     """Speichert DataFrame entweder als lokale CSV oder in Google‑Sheets."""
@@ -82,25 +87,41 @@ def save_csv(df: pd.DataFrame, path: Path):
         ws = _get_ws(ws_name, tuple(df.columns))
         ws.clear()
         set_with_dataframe(ws, df.reset_index(drop=True))
+        # Cache aktualisieren
+        st.session_state["dfs"][path.name] = df.copy()
         time.sleep(0.1)  # Throttle to avoid hitting per‑minute quota
     else:
         df.to_csv(path, index=False)
+        # Cache aktualisieren
+        st.session_state["dfs"][path.name] = df.copy()
 
 
 def load_or_create(path: Path, cols: list[str]) -> pd.DataFrame:
     """Lädt DataFrame aus CSV oder Google‑Sheets; legt bei Bedarf leere Tabelle an."""
+    # Zuerst Session‑Cache prüfen
+    if path.name in st.session_state["dfs"]:
+        return st.session_state["dfs"][path.name]
+
     if USE_GSHEETS and path.name in SHEET_NAMES:
         ws = _get_ws(SHEET_NAMES[path.name], tuple(cols))
         df = get_as_dataframe(ws).dropna(how="all")
         # Falls Sheet gerade frisch angelegt → Kopfzeile schreiben
         if df.empty and ws.row_count == 0:
             set_with_dataframe(ws, pd.DataFrame(columns=cols))
-            return pd.DataFrame(columns=cols)
-        return df if not df.empty else pd.DataFrame(columns=cols)
+            df = pd.DataFrame(columns=cols)
+            st.session_state["dfs"][path.name] = df.copy()
+            return df
+        result_df = df if not df.empty else pd.DataFrame(columns=cols)
+        st.session_state["dfs"][path.name] = result_df.copy()
+        return result_df
     else:
         if path.exists():
-            return pd.read_csv(path)
-        return pd.DataFrame(columns=cols)
+            df = pd.read_csv(path)
+            st.session_state["dfs"][path.name] = df.copy()
+            return df
+        df = pd.DataFrame(columns=cols)
+        st.session_state["dfs"][path.name] = df.copy()
+        return df
 
 def calc_elo(r_a, r_b, score_a, k=32):
     """Klassische ELO-Formel (1 = Sieg, 0 = Niederlage)"""
