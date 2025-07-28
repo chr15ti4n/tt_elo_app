@@ -79,7 +79,7 @@ def save_csv(df: pd.DataFrame, path: Path):
     """Speichert DataFrame entweder als lokale CSV oder in Google‑Sheets."""
     if USE_GSHEETS and path.name in SHEET_NAMES:
         ws_name = SHEET_NAMES[path.name]
-        ws = _get_ws(ws_name, df.columns.tolist())
+        ws = _get_ws(ws_name, tuple(df.columns))
         ws.clear()
         set_with_dataframe(ws, df.reset_index(drop=True))
         time.sleep(0.1)  # Throttle to avoid hitting per‑minute quota
@@ -90,7 +90,7 @@ def save_csv(df: pd.DataFrame, path: Path):
 def load_or_create(path: Path, cols: list[str]) -> pd.DataFrame:
     """Lädt DataFrame aus CSV oder Google‑Sheets; legt bei Bedarf leere Tabelle an."""
     if USE_GSHEETS and path.name in SHEET_NAMES:
-        ws = _get_ws(SHEET_NAMES[path.name], cols)
+        ws = _get_ws(SHEET_NAMES[path.name], tuple(cols))
         df = get_as_dataframe(ws).dropna(how="all")
         # Falls Sheet gerade frisch angelegt → Kopfzeile schreiben
         if df.empty and ws.row_count == 0:
