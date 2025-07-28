@@ -9,6 +9,8 @@ import bcrypt
 import qrcode
 # Google Sheets
 import os
+import functools
+import time
 import gspread
 from gspread_dataframe import get_as_dataframe, set_with_dataframe
 
@@ -38,8 +40,19 @@ if not QR_FILE.exists():
 # ---------- Google Sheets ----------
 USE_GSHEETS = "gcp" in st.secrets  # Nur aktiv, wenn Service‑Account‑Creds hinterlegt
 
+# Google Sheets Caching/Singleton helpers
 if USE_GSHEETS:
-    gc = gspread.service_account_from_dict(st.secrets["gcp"])
+
+    @st.experimental_singleton
+    def _get_sheet():
+        gc_local = gspread.service_account_from_dict(st.secrets["gcp"])
+        spread_id = st.secrets.get("spread_id", "")
+        if spread_id:
+            return gc_local.open_by_key(spread_id)
+        return gc_local.open("tt_elo")
+
+    sh = _get_sheet()  # einmal pro Session
+
     SHEET_NAMES = {
         "players.csv":  "players",
         "matches.csv":  "matches",
@@ -49,20 +62,14 @@ if USE_GSHEETS:
         "pending_rounds.csv": "pending_rounds",
         "rounds.csv":   "rounds",
     }
-    # Falls du lieber per ID öffnest, trage sie hier ein (leer = Name verwenden)
-    SPREAD_ID = st.secrets.get("spread_id", "")  # optional in secrets
-    try:
-        if SPREAD_ID:
-            sh = gc.open_by_key(SPREAD_ID)
-        else:
-            sh = gc.open("tt_elo")
-    except gspread.SpreadsheetNotFound:
-        # Fallback: Sheet erzeugen (im Drive des Service-Accounts)
-        sh = gc.create("tt_elo")
-        # Freigabe an deinen Google‑Account (falls vorhanden)
-        owner = st.secrets.get("owner_email")
-        if owner:
-            sh.share(owner, perm_type="user", role="writer")
+
+    @functools.lru_cache(maxsize=None)
+    def _get_ws(name: str, cols: list[str]):
+        """Gibt Worksheet‑Objekt; legt es bei Bedarf an (cached)."""
+        try:
+            return sh.worksheet(name)
+        except gspread.WorksheetNotFound:
+            return sh.add_worksheet(name, rows=1000, cols=len(cols))
 # endregion
 
 # region Helper Functions
@@ -72,12 +79,10 @@ def save_csv(df: pd.DataFrame, path: Path):
     """Speichert DataFrame entweder als lokale CSV oder in Google‑Sheets."""
     if USE_GSHEETS and path.name in SHEET_NAMES:
         ws_name = SHEET_NAMES[path.name]
-        try:
-            ws = sh.worksheet(ws_name)
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(ws_name, rows=max(len(df) + 10, 1000), cols=len(df.columns))
+        ws = _get_ws(ws_name, df.columns.tolist())
         ws.clear()
         set_with_dataframe(ws, df.reset_index(drop=True))
+        time.sleep(0.1)  # Throttle to avoid hitting per‑minute quota
     else:
         df.to_csv(path, index=False)
 
@@ -85,14 +90,12 @@ def save_csv(df: pd.DataFrame, path: Path):
 def load_or_create(path: Path, cols: list[str]) -> pd.DataFrame:
     """Lädt DataFrame aus CSV oder Google‑Sheets; legt bei Bedarf leere Tabelle an."""
     if USE_GSHEETS and path.name in SHEET_NAMES:
-        ws_name = SHEET_NAMES[path.name]
-        try:
-            ws = sh.worksheet(ws_name)
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(ws_name, rows=1000, cols=len(cols))
+        ws = _get_ws(SHEET_NAMES[path.name], cols)
+        df = get_as_dataframe(ws).dropna(how="all")
+        # Falls Sheet gerade frisch angelegt → Kopfzeile schreiben
+        if df.empty and ws.row_count == 0:
             set_with_dataframe(ws, pd.DataFrame(columns=cols))
             return pd.DataFrame(columns=cols)
-        df = get_as_dataframe(ws).dropna(how="all")
         return df if not df.empty else pd.DataFrame(columns=cols)
     else:
         if path.exists():
