@@ -43,7 +43,7 @@ USE_GSHEETS = "gcp" in st.secrets  # Nur aktiv, wenn Service‑Account‑Creds h
 # Google Sheets Caching/Singleton helpers
 if USE_GSHEETS:
 
-    @st.experimental_singleton
+    @st.cache_resource
     def _get_sheet():
         gc_local = gspread.service_account_from_dict(st.secrets["gcp"])
         spread_id = st.secrets.get("spread_id", "")
