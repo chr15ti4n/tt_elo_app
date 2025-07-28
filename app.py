@@ -5,7 +5,12 @@ from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo 
 import bcrypt
-import qrcode  # QR-Code generation
+# QR-Code generation
+import qrcode
+# Google Sheets
+import os
+import gspread
+from gspread_dataframe import get_as_dataframe, set_with_dataframe
 
 # region Admins
 ADMINS = {"Chris"}
@@ -22,24 +27,64 @@ PENDING_R = Path("pending_rounds.csv")
 ROUNDS    = Path("rounds.csv")          
 # endregion
 
+
 # ---------- QR-Code für Schnellzugriff ----------
 QR_FILE = Path("form_qr.png")
 APP_URL  = "https://tt-elo.streamlit.app"
 if not QR_FILE.exists():
     qr_img = qrcode.make(APP_URL)
     qr_img.save(QR_FILE)
+
+# ---------- Google Sheets ----------
+USE_GSHEETS = "gcp" in st.secrets  # Nur aktiv, wenn Service‑Account‑Creds hinterlegt
+
+if USE_GSHEETS:
+    gc = gspread.service_account_from_dict(st.secrets["gcp"])
+    sh = gc.open("tt_elo")  # Name des Google‑Sheets
+    SHEET_NAMES = {
+        "players.csv":  "players",
+        "matches.csv":  "matches",
+        "pending_matches.csv": "pending_matches",
+        "pending_doubles.csv": "pending_doubles",
+        "doubles.csv":  "doubles",
+        "pending_rounds.csv": "pending_rounds",
+        "rounds.csv":   "rounds",
+    }
 # endregion
 
 # region Helper Functions
 # ---------- Hilfsfunktionen ----------
 
-def save_csv(df, path):
-    df.to_csv(path, index=False)
+def save_csv(df: pd.DataFrame, path: Path):
+    """Speichert DataFrame entweder als lokale CSV oder in Google‑Sheets."""
+    if USE_GSHEETS and path.name in SHEET_NAMES:
+        ws_name = SHEET_NAMES[path.name]
+        try:
+            ws = sh.worksheet(ws_name)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(ws_name, rows=max(len(df) + 10, 1000), cols=len(df.columns))
+        ws.clear()
+        set_with_dataframe(ws, df.reset_index(drop=True))
+    else:
+        df.to_csv(path, index=False)
+
 
 def load_or_create(path: Path, cols: list[str]) -> pd.DataFrame:
-    if path.exists():
-        return pd.read_csv(path)
-    return pd.DataFrame(columns=cols)
+    """Lädt DataFrame aus CSV oder Google‑Sheets; legt bei Bedarf leere Tabelle an."""
+    if USE_GSHEETS and path.name in SHEET_NAMES:
+        ws_name = SHEET_NAMES[path.name]
+        try:
+            ws = sh.worksheet(ws_name)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(ws_name, rows=1000, cols=len(cols))
+            set_with_dataframe(ws, pd.DataFrame(columns=cols))
+            return pd.DataFrame(columns=cols)
+        df = get_as_dataframe(ws).dropna(how="all")
+        return df if not df.empty else pd.DataFrame(columns=cols)
+    else:
+        if path.exists():
+            return pd.read_csv(path)
+        return pd.DataFrame(columns=cols)
 
 def calc_elo(r_a, r_b, score_a, k=32):
     """Klassische ELO-Formel (1 = Sieg, 0 = Niederlage)"""
