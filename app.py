@@ -318,67 +318,67 @@ if "current_player" not in st.session_state:
 if "view_mode" not in st.session_state:
     st.session_state.view_mode = "spiel"
 
+# Remove sidebar wrapper and dedent login/registration UI to main area
 if not st.session_state.logged_in:
-    with st.sidebar:  # Login‑UI nur solange nicht eingeloggt
-        st.header("Login / Registrieren")
-        default_mode = "Registrieren" if players.empty else "Login"
-        mode = st.radio("Aktion wählen", ("Login", "Registrieren"),
-                        index=0 if default_mode == "Login" else 1)
+    st.header("Login / Registrieren")
+    default_mode = "Registrieren" if players.empty else "Login"
+    mode = st.radio("Aktion wählen", ("Login", "Registrieren"),
+                    index=0 if default_mode == "Login" else 1)
 
-        if mode == "Login":
-            if players.empty:
-                st.info("Noch keine Spieler angelegt.")
-            else:
-                login_name = st.selectbox(
-                    "Spieler",
-                    players["Name"],
-                    index=None,
-                    placeholder="Name wählen"
-                )
-                login_pin = st.text_input("PIN", type="password")
-                if login_name is None:
-                    st.stop()
-                if st.button("Einloggen"):
-                    stored_pin = players.loc[players["Name"] == login_name, "Pin"].iat[0]
-                    if check_pin(login_pin, stored_pin):
-                        # Falls PIN noch im Klartext war: sofort hash speichern
-                        if not stored_pin.startswith("$2b$") and not stored_pin.startswith("$2a$"):
-                            players.loc[players["Name"] == login_name, "Pin"] = hash_pin(login_pin)
-                            save_csv(players, PLAYERS)
-                        st.session_state.logged_in = True
-                        st.session_state.current_player = login_name
-                        st.rerun()
-                    else:
-                        st.error("Falsche PIN")
-
-        elif mode == "Registrieren":
-            reg_name = st.text_input("Neuer Spielername")
-            reg_pin1 = st.text_input("PIN wählen (4-stellig)", type="password")
-            reg_pin2 = st.text_input("PIN bestätigen", type="password")
-            if st.button("Registrieren"):
-                if reg_name == "" or reg_pin1 == "":
-                    st.warning("Name und PIN eingeben.")
-                elif reg_pin1 != reg_pin2:
-                    st.warning("PINs stimmen nicht überein.")
-                elif reg_name in players["Name"].values:
-                    st.warning("Spieler existiert bereits.")
-                else:
-                    new_player = {
-                        "Name": reg_name,
-                        "ELO": 1200,
-                        "Siege": 0,
-                        "Niederlagen": 0,
-                        "Spiele": 0,
-                        "Pin": hash_pin(reg_pin1),
-                        "D_ELO": 1200,
-                        "D_Siege": 0,
-                        "D_Niederlagen": 0,
-                        "D_Spiele": 0,
-                    }
-                    players = pd.concat([players, pd.DataFrame([new_player])], ignore_index=True)
-                    save_csv(players, PLAYERS)
-                    st.success(f"{reg_name} angelegt. Jetzt einloggen.")
+    if mode == "Login":
+        if players.empty:
+            st.info("Noch keine Spieler angelegt.")
+        else:
+            login_name = st.selectbox(
+                "Spieler",
+                players["Name"],
+                index=None,
+                placeholder="Name wählen"
+            )
+            login_pin = st.text_input("PIN", type="password")
+            if login_name is None:
+                st.stop()
+            if st.button("Einloggen"):
+                stored_pin = players.loc[players["Name"] == login_name, "Pin"].iat[0]
+                if check_pin(login_pin, stored_pin):
+                    # Falls PIN noch im Klartext war: sofort hash speichern
+                    if not stored_pin.startswith("$2b$") and not stored_pin.startswith("$2a$"):
+                        players.loc[players["Name"] == login_name, "Pin"] = hash_pin(login_pin)
+                        save_csv(players, PLAYERS)
+                    st.session_state.logged_in = True
+                    st.session_state.current_player = login_name
                     st.rerun()
+                else:
+                    st.error("Falsche PIN")
+
+    elif mode == "Registrieren":
+        reg_name = st.text_input("Neuer Spielername")
+        reg_pin1 = st.text_input("PIN wählen (4-stellig)", type="password")
+        reg_pin2 = st.text_input("PIN bestätigen", type="password")
+        if st.button("Registrieren"):
+            if reg_name == "" or reg_pin1 == "":
+                st.warning("Name und PIN eingeben.")
+            elif reg_pin1 != reg_pin2:
+                st.warning("PINs stimmen nicht überein.")
+            elif reg_name in players["Name"].values:
+                st.warning("Spieler existiert bereits.")
+            else:
+                new_player = {
+                    "Name": reg_name,
+                    "ELO": 1200,
+                    "Siege": 0,
+                    "Niederlagen": 0,
+                    "Spiele": 0,
+                    "Pin": hash_pin(reg_pin1),
+                    "D_ELO": 1200,
+                    "D_Siege": 0,
+                    "D_Niederlagen": 0,
+                    "D_Spiele": 0,
+                }
+                players = pd.concat([players, pd.DataFrame([new_player])], ignore_index=True)
+                save_csv(players, PLAYERS)
+                st.success(f"{reg_name} angelegt. Jetzt einloggen.")
+                st.rerun()
 # Eingeloggt: Sidebar zeigt Menü und Logout
 else:
     with st.sidebar:
@@ -674,7 +674,7 @@ if st.session_state.view_mode == "doppel":
             for idx,row in to_conf.iterrows():
                 st.write(f"{row.A1}&{row.A2}  {row.PunkteA}:{row.PunkteB}  {row.B1}&{row.B2}")
                 col1,col2 = st.columns(2)
-                if col1.button("Bestätigen", key=f"d_ok_{idx}"):
+                if col1.button("Bestätigen ✅", key=f"d_ok_{idx}"):
                     pending_d.at[idx, "confA" if current_player in (row.A1,row.A2) else "confB"] = True
                     if pending_d.at[idx,"confA"] and pending_d.at[idx,"confB"]:
                         doubles = pd.concat(
@@ -687,7 +687,7 @@ if st.session_state.view_mode == "doppel":
                     save_csv(pending_d, PENDING_D)
                     save_csv(players, PLAYERS)
                     st.rerun()
-                if col2.button("Ablehnen", key=f"d_no_{idx}"):
+                if col2.button("Ablehnen ❌", key=f"d_no_{idx}"):
                     pending_d.drop(idx, inplace=True)
                     save_csv(pending_d, PENDING_D)
                     st.rerun()
@@ -770,7 +770,7 @@ if st.session_state.view_mode == "spiel":
 
                 col_ok, col_rej = st.columns(2)
                 with col_ok:
-                    if st.button("Bestätigen", key=f"conf_{idx}"):
+                    if st.button("Bestätigen ✅", key=f"conf_{idx}"):
                         if row["A"] == current_player:
                             pending.at[idx, "confA"] = True
                         else:
@@ -790,7 +790,7 @@ if st.session_state.view_mode == "spiel":
                         st.rerun()
 
                 with col_rej:
-                    if st.button("Ablehnen", key=f"rej_{idx}"):
+                    if st.button("Ablehnen ❌", key=f"rej_{idx}"):
                         # Einfach aus der Pending-Liste entfernen, keine ELO-Anpassung
                         pending.drop(idx, inplace=True)
                         save_csv(pending, PENDING)
