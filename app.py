@@ -316,7 +316,7 @@ if "current_player" not in st.session_state:
     st.session_state.current_player = None
 # -------- Auto‑Login per URL ?user=&token= ----------
 if not st.session_state.logged_in:
-    q = st.query_params()
+    q = st.experimental_get_query_params()
     if "user" in q and "token" in q:
         auto_user  = q["user"][0]
         auto_token = q["token"][0]
@@ -359,7 +359,7 @@ if not st.session_state.logged_in:
                     st.session_state.logged_in = True
                     st.session_state.current_player = login_name
                     # Save login in URL so refresh preserves session
-                    st.query_params(user=login_name, token=players.loc[players["Name"] == login_name, "Pin"].iat[0])
+                    st.experimental_set_query_params(user=login_name, token=players.loc[players["Name"] == login_name, "Pin"].iat[0])
                     st.rerun()
                 else:
                     st.error("Falsche PIN")
@@ -417,7 +417,7 @@ else:
         if st.button("🚪 Logout", use_container_width=True):
             st.session_state.logged_in = False
             st.session_state.current_player = None
-            st.query_params()  # clear
+            st.experimental_set_query_params()  # clear
             st.rerun()
         
         if st.button("🔄 Aktualisieren", use_container_width=True):
@@ -471,7 +471,7 @@ else:
                 save_csv(rounds,    ROUNDS)
                 save_csv(pending_r, PENDING_R)
 
-                st.query_params()  # clear URL params
+                st.experimental_set_query_params()  # clear URL params
                 st.success("Account und alle zugehörigen Daten wurden gelöscht.")
                 st.session_state.logged_in = False
                 st.session_state.current_player = None
