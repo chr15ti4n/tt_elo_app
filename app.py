@@ -685,7 +685,8 @@ if st.session_state.view_mode == "doppel":
         b2 = c[3].selectbox("B2", players[~players.Name.isin([a1,a2,b1])].Name, index=None, placeholder="Spieler wählen", key="d_b2")
         pA = st.number_input("Punkte A", 0, 21, 11, key="d_pA")
         pB = st.number_input("Punkte B", 0, 21, 8, key="d_pB")
-        if st.button("Doppel speichern"):
+        save_disabled = any(x is None for x in (a1, a2, b1, b2))
+        if st.button("Doppel speichern", disabled=save_disabled):
             pending_d.loc[len(pending_d)] = [
                 datetime.now(ZoneInfo("Europe/Berlin")), a1, a2, b1, b2, pA, pB, True, False
             ]
@@ -768,7 +769,8 @@ if st.session_state.view_mode == "spiel":
         b = st.selectbox("Gegner wählen", players[players["Name"] != current_player]["Name"],
                          index=None, placeholder="Spieler wählen")
         pb = st.number_input("Punkte Gegner", 0, 21, 8)
-        if st.button("Match speichern"):
+        save_disabled = (b is None)
+        if st.button("Match speichern", disabled=save_disabled):
             if current_player == b:
                 st.error("Spieler dürfen nicht identisch sein.")
             else:
@@ -875,7 +877,8 @@ if st.session_state.view_mode == "round":
         sieger = st.selectbox("Sieger (muss Finalist sein)", sieger_options,
                               index=None, placeholder="Sieger wählen", key="r_win")
 
-        if st.button("Rundlauf speichern"):
+        save_disabled = (fin1 is None or fin2 is None or sieger is None)
+        if st.button("Rundlauf speichern", disabled=save_disabled):
             new_row = {
                 "Datum": datetime.now(ZoneInfo("Europe/Berlin")),
                 "Teilnehmer": ";".join(selected),
