@@ -1,6 +1,7 @@
 # region Imports
 import streamlit as st
 from contextlib import contextmanager
+import numpy as np
 
 @contextmanager
 def ui_container(title: str):
@@ -256,6 +257,7 @@ for col in ["R_ELO", "R_Siege", "R_Zweite", "R_Niederlagen", "R_Spiele"]:
         players[col] = 1200 if col == "R_ELO" else 0
         
 players = compute_gelo(players)
+# Daten laden
 matches = load_or_create(MATCHES, ["Datum", "A", "B", "PunkteA", "PunkteB"])
 pending = load_or_create(PENDING, ["Datum", "A", "B", "PunkteA", "PunkteB", "confA", "confB"])
 pending_d = load_or_create(PENDING_D, ["Datum","A1","A2","B1","B2","PunkteA","PunkteB","confA","confB"])
@@ -269,6 +271,13 @@ if "confirmed_by" not in pending_r.columns:
         pending_r["confirmed_by"] = ""
     save_csv(pending_r, PENDING_R)
 rounds    = load_or_create(ROUNDS,    ["Datum","Teilnehmer","Finalist1","Finalist2","Sieger"])
+
+# Ensure confA/confB are boolean for logical operations
+pending["confA"]   = pending["confA"].astype(bool)
+pending["confB"]   = pending["confB"].astype(bool)
+pending_d["confA"] = pending_d["confA"].astype(bool)
+pending_d["confB"] = pending_d["confB"].astype(bool)
+
 for df in (matches, pending, pending_d, doubles, pending_r, rounds):
     if not df.empty:
         df["Datum"] = (
@@ -619,6 +628,33 @@ if st.session_state.view_mode == "home":
     mini_lb(players[players.R_Spiele > 0], "R_ELO", "Rundlauf – Ranking", height=175)
 
     st.divider()
+    # --- Pending Confirmation Counts ------------------------------
+    # Einzel
+    sp = pending[
+        (
+            (pending["A"] == current_player) & (~pending["confA"])
+        ) | (
+            (pending["B"] == current_player) & (~pending["confB"])
+        )
+    ]
+    # Doppel
+    dp = pending_d[
+        (
+            (pending_d["A1"] == current_player) | (pending_d["A2"] == current_player)
+        ) & (~pending_d["confA"])
+        |
+        (
+            (pending_d["B1"] == current_player) | (pending_d["B2"] == current_player)
+        ) & (~pending_d["confB"])
+    ]
+    # Rundlauf
+    rp = pending_r[
+        pending_r["Teilnehmer"].str.contains(current_player, na=False)
+    ].copy()
+    rp["confirmed"] = rp["confirmed_by"].fillna("").apply(lambda s: current_player in s.split(";"))
+    rp = rp[~rp["confirmed"]]
+    total_pending = len(sp) + len(dp) + len(rp)
+
     bcols = st.columns(4)
     if bcols[0].button("➕ Einzel", use_container_width=True):
         _open_modal("show_single_modal"); st.rerun()
@@ -626,7 +662,8 @@ if st.session_state.view_mode == "home":
         _open_modal("show_double_modal"); st.rerun()
     if bcols[2].button("➕ Rundlauf", use_container_width=True):
         _open_modal("show_round_modal"); st.rerun()
-    if bcols[3].button("✅ Offene bestätigen", use_container_width=True):
+    confirm_label = f"✅ Offene bestätigen ({total_pending})" if total_pending > 0 else "✅ Offene bestätigen"
+    if bcols[3].button(confirm_label, use_container_width=True):
         _open_modal("show_confirm_modal"); st.rerun()
 
     # --- Modale Eingabe-Dialoge (Einzel/Doppel/Rundlauf) -----------------
@@ -651,7 +688,6 @@ if st.session_state.view_mode == "home":
                     ]
                     save_csv(pending, PENDING)
                     st.success("Match gespeichert – wartet auf Bestätigung.")
-                    _open_modal("")  # close
                     st.rerun()
             if col_cancel.button("Abbrechen", key="single_cancel"):
                 _open_modal("")
@@ -675,7 +711,6 @@ if st.session_state.view_mode == "home":
                 ]
                 save_csv(pending_d, PENDING_D)
                 st.success("Doppel gespeichert – wartet auf Bestätigung.")
-                _open_modal("")
                 st.rerun()
             if c_cancel.button("Abbrechen", key="double_cancel"):
                 _open_modal(""); st.rerun()
@@ -706,7 +741,6 @@ if st.session_state.view_mode == "home":
                 }
                 save_csv(pending_r, PENDING_R)
                 st.success("Rundlauf gespeichert – wartet auf Bestätigung.")
-                _open_modal("")
                 st.rerun()
             if r_cancel.button("Abbrechen", key="round_cancel"):
                 _open_modal("")
@@ -737,13 +771,11 @@ if st.session_state.view_mode == "home":
                         _rebuild_all()
                     save_csv(pending, PENDING)
                     st.success("Bestätigt.")
-                    _open_modal("")
                     st.rerun()
                 if col_rej.button("❌", key=f"rej_single_{idx}"):
                     pending.drop(idx, inplace=True)
                     save_csv(pending, PENDING)
                     st.warning("Match abgelehnt und entfernt.")
-                    _open_modal("")
                     st.rerun()
 
             st.write("### Doppel")
@@ -776,13 +808,11 @@ if st.session_state.view_mode == "home":
                         _rebuild_all()
                     save_csv(pending_d, PENDING_D)
                     st.success("Bestätigt.")
-                    _open_modal("")
                     st.rerun()
                 if col_rej.button("❌", key=f"rej_double_{idx}"):
                     pending_d.drop(idx, inplace=True)
                     save_csv(pending_d, PENDING_D)
                     st.warning("Doppel abgelehnt und entfernt.")
-                    _open_modal("")
                     st.rerun()
 
             st.write("### Rundlauf")
@@ -805,13 +835,11 @@ if st.session_state.view_mode == "home":
                         _rebuild_all()
                     save_csv(pending_r, PENDING_R)
                     st.success("Bestätigt.")
-                    _open_modal("")
                     st.rerun()
                 if col_rej.button("❌", key=f"rej_round_{idx}"):
                     pending_r.drop(idx, inplace=True)
                     save_csv(pending_r, PENDING_R)
                     st.warning("Rundlauf abgelehnt und entfernt.")
-                    _open_modal("")
                     st.rerun()
 
             if st.button("❌ Schließen"):
