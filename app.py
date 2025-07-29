@@ -614,11 +614,10 @@ if st.session_state.view_mode == "home":
         * Zeile des aktuellen Spielers gelb hinterlegt
         * Scrollbar (fixe Höhe)
         """
-        tab = (df.sort_values(elo_col, ascending=False)
-                 .loc[:, ["Name", elo_col]]
-                 .rename(columns={elo_col: "ELO"})
-                 .reset_index(drop=True))
+        # Baue das Leaderboard-Table und sortiere nach Elo absteigend
+        tab = df.loc[:, ["Name", elo_col]].rename(columns={elo_col: "ELO"}).copy()
         tab["ELO"] = tab["ELO"].astype(int)
+        tab = tab.sort_values("ELO", ascending=False).reset_index(drop=True)
 
         # Highlightfunktion
         def _highlight(row):
