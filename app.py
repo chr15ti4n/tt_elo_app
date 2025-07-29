@@ -280,12 +280,10 @@ pending["confB"]   = pending["confB"].astype(bool)
 pending_d["confA"] = pending_d["confA"].astype(bool)
 pending_d["confB"] = pending_d["confB"].astype(bool)
 
+# Always convert Datum to pandas datetime with Berlin timezone
 for df in (matches, pending, pending_d, doubles, pending_r, rounds):
-    if not df.empty:
-        df["Datum"] = (
-            pd.to_datetime(df["Datum"], utc=True, errors="coerce")
-              .dt.tz_convert("Europe/Berlin")
-        )
+    df["Datum"] = pd.to_datetime(df["Datum"], utc=True, errors="coerce")\
+                       .dt.tz_convert("Europe/Berlin")
 # endregion
 
 # region Doppel ELO Rebuild
