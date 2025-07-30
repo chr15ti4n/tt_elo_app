@@ -427,32 +427,29 @@ if not st.session_state.logged_in:
         if players.empty:
             st.info("Noch keine Spieler angelegt.")
         else:
-            login_name = st.selectbox(
-                "Spieler",
-                players["Name"],
-                index=None,
-                placeholder="Name wählen"
-            )
+            # Manuelle Eingabe des Spielernamens statt Auswahl
+            login_name = st.text_input("Spielername")
             login_pin = st.text_input("PIN", type="password")
-            if login_name is None:
-                st.stop()
             if st.button("Einloggen"):
-                stored_pin = players.loc[players["Name"] == login_name, "Pin"].iat[0]
-                if check_pin(login_pin, stored_pin):
-                    # Falls PIN noch im Klartext war: sofort hash speichern
-                    if not stored_pin.startswith("$2b$") and not stored_pin.startswith("$2a$"):
-                        players.loc[players["Name"] == login_name, "Pin"] = hash_pin(login_pin)
-                        save_csv(players, PLAYERS)
-                    st.session_state.logged_in = True
-                    st.session_state.current_player = login_name
-                    # Save login in URL so refresh preserves session
-                    st.query_params.update({
-                        "user": login_name,
-                        "token": players.loc[players["Name"] == login_name, "Pin"].iat[0],
-                    })
-                    st.rerun()
+                if login_name not in players["Name"].values:
+                    st.error("Spielername nicht gefunden.")
                 else:
-                    st.error("Falsche PIN")
+                    stored_pin = players.loc[players["Name"] == login_name, "Pin"].iat[0]
+                    if check_pin(login_pin, stored_pin):
+                        # Falls PIN noch im Klartext war: sofort hash speichern
+                        if not stored_pin.startswith("$2b$") and not stored_pin.startswith("$2a$"):
+                            players.loc[players["Name"] == login_name, "Pin"] = hash_pin(login_pin)
+                            save_csv(players, PLAYERS)
+                        st.session_state.logged_in = True
+                        st.session_state.current_player = login_name
+                        # Save login in URL so refresh preserves session
+                        st.query_params.update({
+                            "user": login_name,
+                            "token": players.loc[players["Name"] == login_name, "Pin"].iat[0],
+                        })
+                        st.rerun()
+                    else:
+                        st.error("Falsche PIN")
 
     elif mode == "Registrieren":
         reg_name = st.text_input("Neuer Spielername")
@@ -595,7 +592,7 @@ current_player = st.session_state.current_player
 
 # region Home Ansicht
 if st.session_state.view_mode == "home":
-    st.title("🏓 Tischtennis-Dashboard")
+    st.title("🏓 Dashboard")
     # Mobile: Metrics schmaler machen, damit sie in einer Zeile bleiben und Schriftgrößen anpassen
     st.markdown(
         """
@@ -603,8 +600,16 @@ if st.session_state.view_mode == "home":
         /* Flex metrics */
         [data-testid="metric-container"] {
             flex: none !important;
-            width: 30% !important;
+            width: auto !important;
             padding: 0.2rem !important;
+            text-align: center !important;
+            margin: 0 auto !important;
+        }
+        [data-testid="metric-container"] > div {
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: center !important;
+            justify-content: center !important;
         }
         /* Label text */
         [data-testid="metric-container"] > div:first-child p {
@@ -612,7 +617,7 @@ if st.session_state.view_mode == "home":
         }
         /* Value text */
         [data-testid="metric-container"] > div:nth-child(2) p {
-            font-size: 1.2rem !important;
+            font-size: 5rem !important;
             line-height: 1.1 !important;
         }
         /* Leaderboards: kleinere Schrift und kompaktere Zellen auf Mobil */
@@ -623,6 +628,15 @@ if st.session_state.view_mode == "home":
             padding: 0.2rem 0.3rem !important;
           }
         }
+        /* Spaltenzeilen: nicht umbrechen, horizontal scroll */
+        [data-testid="stColumns"] {
+            display: flex !important;
+            flex-wrap: nowrap !important;
+            overflow-x: auto !important;
+        }
+        [data-testid="stColumn"] {
+            min-width: 100px !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -630,78 +644,205 @@ if st.session_state.view_mode == "home":
     user = players.loc[players.Name == current_player].iloc[0]
 
     st.markdown(f"### Willkommen, **{current_player}**!")
-    # Gesamt-ELO zentriert, darunter Einzel/Doppel/Rundlauf nebeneinander
+
+    # Top: Gesamt-ELO, zentriert
+    st.markdown(
+        f"""
+        <div style="text-align:center; margin:1rem 0;">
+          <div style="font-size:1.5rem; color:var(--text-secondary);">ELO</div>
+          <div style="font-size:3rem; font-weight:bold; color:var(--text-primary);">{int(user.G_ELO)}</div>
+        </div>
+        """, unsafe_allow_html=True
+    )
+
+    cols = st.columns(3)
+    with cols[0]:
+        st.markdown(
+            f"""
+            <div style="text-align:center;">
+              <div style="font-size:1.5rem; color:var(--text-secondary);">Einzel</div>
+              <div style="font-size:2.2rem; font-weight:bold; color:var(--text-primary);">{int(user.ELO)}</div>
+            </div>
+            """, unsafe_allow_html=True
+        )
+    with cols[1]:
+        st.markdown(
+            f"""
+            <div style="text-align:center;">
+            <div style="font-size:1.5rem; color:var(--text-secondary);">Doppel</div>
+            <div style="font-size:2.2rem; font-weight:bold; color:var(--text-primary);">{int(user.D_ELO)}</div>
+            </div>
+        """, unsafe_allow_html=True
+        )
+    with cols[2]:
+        st.markdown(
+            f"""
+            <div style="text-align:center;">
+              <div style="font-size:1.5rem; color:var(--text-secondary);">Rundlauf</div>
+              <div style="font-size:2.2rem; font-weight:bold; color:var(--text-primary);">{int(user.R_ELO)}</div>
+            </div>
+            """, unsafe_allow_html=True
+        )
+    # DataFrame mit Spielern, die mindestens ein Spiel haben
+    active = players[
+        (players.Spiele > 0)
+        | (players.D_Spiele > 0)
+        | (players.R_Spiele > 0)
+    ]
+    # Gesamt-Leaderboard als volle Breite HTML-Tabelle
+    df_total = active.loc[:, ["Name", "G_ELO"]] \
+        .rename(columns={"G_ELO": "ELO"}) \
+        .sort_values("ELO", ascending=False)
+    # Highlight current player in Gesamt-Leaderboard
+    def highlight_current(row):
+        # Highlight the current player row with light blue background and black text
+        return [
+            'background-color: #ADD8E6; color: black'
+            if row['Name'] == current_player else ''
+            for _ in row
+        ]
+    styler_total = (
+        df_total.style
+        .apply(highlight_current, axis=1)
+        .format({"ELO": "{:.0f}"})
+        .set_table_attributes('class="total-table"')
+    )
+    html_total = (
+        styler_total
+        .to_html(border=0)
+    )
+    st.subheader("Gesamt Leaderboard")
+    st.markdown(
+        f"<div class='total-table-container'>{html_total}</div>",
+        unsafe_allow_html=True
+    )
+
+    # Drei Modus-Leaderboards als HTML-Tabellen nebeneinander mit Highlight
+    def make_styled(df, elo_col):
+        # Select only Name and the specific elo column, then rename to ELO
+        df2 = df[["Name", elo_col]].copy()
+        df2.columns = ["Name", "ELO"]
+        df2 = df2.sort_values("ELO", ascending=False)
+        # Apply highlight to current player row
+        styler = (
+            df2.style
+            .apply(highlight_current, axis=1)
+            .format({"ELO": "{:.0f}"})
+            .set_table_attributes('class="mini-table"')
+        )
+        return styler.to_html(border=0)
+    html_single = make_styled(players[players.Spiele > 0], "ELO")
+    html_double = make_styled(players[players.D_Spiele > 0], "D_ELO")
+    html_round  = make_styled(players[players.R_Spiele > 0], "R_ELO")
+
+    st.markdown(
+    """
+    <div style="display:flex; width:100%; gap:1rem;">
+      <div style="flex:1; text-align:center; margin:1rem; font-size: 1.1rem;"><strong>Einzel</strong></div>
+      <div style="flex:1; text-align:center; margin:1rem; font-size: 1.1rem;"><strong>Doppel</strong></div>
+      <div style="flex:1; text-align:center; margin:1rem; font-size: 1.1rem;"><strong>Rundlauf</strong></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+    )
+    
     html = f"""
-    <!-- Gesamt-ELO zentriert -->
-    <div style="text-align:center; margin-bottom:1rem;">
-      <p style="font-size:1.2rem; margin:0;">ELO</p>
-      <p style="font-size:1.8rem; margin:0; font-weight:bold;">{int(user.G_ELO)}</p>
-    </div>
-    <!-- Einzel/Doppel/Rundlauf nebeneinander -->
-    <div style="display:flex; gap:1rem; justify-content:center;">
-      <div style="flex:1; min-width:0; text-align:center;">
-        <p style="font-size:1.2rem; margin:0;">Einzel</p>
-        <p style="font-size:1.8rem; margin:0; font-weight:bold;">{int(user.ELO)}</p>
+    <div style="display:flex; width:100%; gap:1rem;">
+      <div style="flex:1 1 auto; min-width:0; text-align:center;">
+        <div class="mini-table-container">{html_single}</div>
       </div>
-      <div style="flex:1; min-width:0; text-align:center;">
-        <p style="font-size:1.2rem; margin:0;">Doppel</p>
-        <p style="font-size:1.8rem; margin:0; font-weight:bold;">{int(user.D_ELO)}</p>
+      <div style="flex:1 1 auto; min-width:0; text-align:center;">
+        <div class="mini-table-container">{html_double}</div>
       </div>
-      <div style="flex:1; min-width:0; text-align:center;">
-        <p style="font-size:1.2rem; margin:0;">Rundlauf</p>
-        <p style="font-size:1.8rem; margin:0; font-weight:bold;">{int(user.R_ELO)}</p>
+      <div style="flex:1 1 auto; min-width:0; text-align:center;">
+        <div class="mini-table-container">{html_round}</div>
       </div>
     </div>
+    <style>
+    /* Reset table margins and spacing so container borders align */
+    .total-table, .mini-table {{
+        border-collapse: collapse !important;
+        border-spacing: 0 !important;
+        margin: 0 !important;
+    }}
+    /* Remove all cell borders by default */
+    .total-table th, .total-table td,
+    .mini-table th, .mini-table td {{
+        border: none !important;
+    }}
+    /* Vertical internal lines between columns */
+    .total-table th + th,
+    .total-table td + td,
+    .mini-table th + th,
+    .mini-table td + td {{
+        border-left: 1px solid rgba(145,145,145,0.3) !important;
+    }}
+    /* Horizontal internal lines between rows */
+    .total-table tr + tr th,
+    .total-table tr + tr td,
+    .mini-table tr + tr th,
+    .mini-table tr + tr td {{
+        border-top: 1px solid rgba(130,130,130,0.3) !important;
+    }}
+    /* Header row styling: background fill and no underline */
+    .total-table-container .total-table th,
+    .mini-table-container .mini-table th {{
+        background-color: rgba(145,145,145,0.2) !important;
+    }}
+    /* Remove all header cell borders */
+    .total-table-container .total-table th,
+    .mini-table-container .mini-table th {{
+        border: none !important;
+    }}
+    /* Remove any internal column line from header */
+    .total-table-container .total-table th + th,
+    .mini-table-container .mini-table th + th {{
+        border-left: none !important;
+    }}
+    /* Remove the first data row’s top border (beneath header) */
+    .total-table tr:nth-child(2) th,
+    .total-table tr:nth-child(2) td,
+    .mini-table tr:nth-child(2) th,
+    .mini-table tr:nth-child(2) td {{
+        border-top: none !important;
+    }}
+    /* Rounded corners and subtle border for all tables */
+    .total-table-container,
+    .mini-table-container {{
+        border-radius: 8px !important;
+        overflow: hidden !important;
+        border: 1px solid rgba(130,130,130,0.2) !important;
+    }}
+    .total-table-container .total-table {{
+        width: 100% !important;
+        table-layout: auto !important;
+    }}
+    /* Hide index column */
+    .total-table-container .total-table th:first-child,
+    .total-table-container .total-table td:first-child {{
+        display: none !important;
+    }}
+    /* Make mini-tables fill their flex column equally */
+    .mini-table {{
+        width: 100% !important;
+        table-layout: fixed !important;
+    }}
+    .mini-table th, .mini-table td {{
+        font-size: 0.8rem !important;
+        padding: 0.2rem !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }}
+
+    /* Hide index for mini tables */
+    .mini-table th:first-child,
+    .mini-table td:first-child {{
+        display: none !important;
+    }}
+    </style>
     """
     st.markdown(html, unsafe_allow_html=True)
-
-    st.divider()
-
-    def mini_lb(df: pd.DataFrame, elo_col: str, title: str, height: int = 350):
-        """
-        Zeigt ein Leaderboard für die angegebene Spielform.
-        * Vollständige Liste (kein Head‑10‑Cut mehr)
-        * Zeile des aktuellen Spielers gelb hinterlegt
-        * Scrollbar (fixe Höhe)
-        """
-        # Baue das Leaderboard-Table und sortiere nach Elo absteigend
-        tab = df.loc[:, ["Name", elo_col]].rename(columns={elo_col: "ELO"}).copy()
-        tab["ELO"] = tab["ELO"].astype(int)
-        tab = tab.sort_values("ELO", ascending=False).reset_index(drop=True)
-
-        # Highlightfunktion
-        def _highlight(row):
-            return ['background-color: #d9eaf7; color: black' if row["Name"] == current_player else '' for _ in row]
-
-        styled = tab.style.apply(_highlight, axis=1)
-
-        st.subheader(title)
-        st.dataframe(styled, hide_index=True, use_container_width=True, height=height)
-    
-    # Nur Spieler mit mindestens einem Spiel in Einzel, Doppel oder Rundlauf
-    active = players[(players["Spiele"] > 0) | (players["D_Spiele"] > 0) | (players["R_Spiele"] > 0)]
-    # Gesamt-ELO ganz oben
-    mini_lb(active, "G_ELO", "Gesamt Leaderboard")
-
-    # Scroll-Container: Leaderboards inline ohne Zeilenumbruch
-    st.markdown(
-        '<div style="display:flex; gap:0.5rem; overflow-x:auto; white-space:nowrap;">',
-        unsafe_allow_html=True,
-    )
-    cols = st.columns([1,1,1], gap="small")
-    with cols[0]:
-        st.markdown('<div style="min-width:100px;">', unsafe_allow_html=True)
-        mini_lb(players[players.Spiele   > 0], "ELO",   "Einzel",  height=175)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with cols[1]:
-        st.markdown('<div style="min-width:100px;">', unsafe_allow_html=True)
-        mini_lb(players[players.D_Spiele > 0], "D_ELO", "Doppel", height=175)
-        st.markdown('</div>', unsafe_allow_html=True)
-    with cols[2]:
-        st.markdown('<div style="min-width:100px;">', unsafe_allow_html=True)
-        mini_lb(players[players.R_Spiele > 0], "R_ELO", "Rundlauf",height=175)
-        st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
     # --- Pending Confirmation Counts ------------------------------
@@ -1029,10 +1170,36 @@ if st.session_state.view_mode == "home":
 if st.session_state.view_mode == "regeln":
     rules_html = """
     <style>
-    .rulebox {font-size:18px; line-height:1.45;}
-    .rulebox h2 {font-size:24px; margin:1.2em 0 .5em;}
-    .rulebox h3 {font-size:20px; margin:1.0em 0 .3em;}
-    .rulebox ul {margin:0 0 1em 1.3em; list-style:disc;}
+    .rulebox {
+      font-size: 18px;
+      line-height: 1.45;
+      padding: 1rem;
+      border-radius: 8px;
+      background-color: rgba(255,255,255,0.9);
+      color: #000;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+      border: 1px solid rgba(0, 0, 0, 0.1);
+    }
+    .rulebox h2 {
+      font-size: 24px;
+      margin: 1.2em 0 0.5em;
+    }
+    .rulebox h3 {
+      font-size: 20px;
+      margin: 1em 0 0.3em;
+    }
+    .rulebox ul {
+      margin: 0 0 1em 1.3em;
+      list-style: disc;
+    }
+    @media (prefers-color-scheme: dark) {
+      .rulebox {
+        background-color: rgba(33,33,33,0.85);
+        color: #fff;
+        box-shadow: 0 2px 6px rgba(255, 255, 255, 0.15);
+        border: 1px solid #ffffff !important;
+      }
+    }
     </style>
 
     <div class="rulebox">
