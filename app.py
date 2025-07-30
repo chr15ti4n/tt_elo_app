@@ -63,7 +63,6 @@ if USE_GSHEETS:
 
         # live / dev umschalten:
         return gc_local.open("tt_elo")    # Produktion
-        # return gc_local.open("ttelodev")    # Dev-Umgebung
 
     sh = _get_sheet()  # einmal pro Session
 
@@ -499,6 +498,10 @@ else:
             _open_modal("")                    # alle Modals schließen
             st.session_state.view_mode = "home"
             st.rerun()
+        
+        if st.button("🏆 Turniermodus", use_container_width=True):
+            st.session_state.view_mode = "turniermodus"
+            st.rerun()
 
         if st.button("♻️ Aktualisieren", use_container_width=True):
             # Cache leeren, damit neu aus Google‑Sheets geladen wird
@@ -592,7 +595,10 @@ current_player = st.session_state.current_player
 
 # region Home Ansicht
 if st.session_state.view_mode == "home":
-    st.title("🏓 Dashboard")
+    st.markdown(
+        '<h1 style="text-align:center; margin-bottom:0.25rem;">🏓 Dashboard</h1>',
+        unsafe_allow_html=True
+    )
     # Mobile: Metrics schmaler machen, damit sie in einer Zeile bleiben und Schriftgrößen anpassen
     st.markdown(
         """
@@ -643,7 +649,10 @@ if st.session_state.view_mode == "home":
     )
     user = players.loc[players.Name == current_player].iloc[0]
 
-    st.markdown(f"### Willkommen, **{current_player}**!")
+    st.markdown(
+        f'<h3 style="text-align:center; margin-top:0;">Willkommen, <strong>{current_player}</strong>!</h3>',
+        unsafe_allow_html=True
+    )
 
     # Top: Gesamt-ELO, zentriert
     st.markdown(
@@ -1166,7 +1175,7 @@ if st.session_state.view_mode == "home":
 
 # endregion
 
-# region Regel Ansicht
+ # region Regel Ansicht
 if st.session_state.view_mode == "regeln":
     rules_html = """
     <style>
@@ -1327,5 +1336,15 @@ if st.session_state.view_mode == "regeln":
     </div>
     """
     st.markdown(rules_html, unsafe_allow_html=True)
+    st.stop()
+# endregion
+
+# region Turniermodus Ansicht
+if st.session_state.view_mode == "turniermodus":
+    st.markdown(
+        '<h1 style="text-align:center; margin-bottom:0.25rem;">🏆 Turnier</h1>',
+        unsafe_allow_html=True
+    )
+    st.write("🚧 In Arbeit 🚧")
     st.stop()
 # endregion
