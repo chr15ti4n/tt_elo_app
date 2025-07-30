@@ -615,6 +615,14 @@ if st.session_state.view_mode == "home":
             font-size: 1.2rem !important;
             line-height: 1.1 !important;
         }
+        /* Leaderboards: kleinere Schrift und kompaktere Zellen auf Mobil */
+        @media (max-width: 600px) {
+          .stDataFrame table th,
+          .stDataFrame table td {
+            font-size: 0.7rem !important;
+            padding: 0.2rem 0.3rem !important;
+          }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -668,15 +676,32 @@ if st.session_state.view_mode == "home":
         styled = tab.style.apply(_highlight, axis=1)
 
         st.subheader(title)
-        st.dataframe(styled, hide_index=True, width=350, height=height)
+        st.dataframe(styled, hide_index=True, use_container_width=True, height=height)
     
     # Nur Spieler mit mindestens einem Spiel in Einzel, Doppel oder Rundlauf
     active = players[(players["Spiele"] > 0) | (players["D_Spiele"] > 0) | (players["R_Spiele"] > 0)]
-    mini_lb(active, "G_ELO", "Gesamt – Ranking")
+    # Gesamt-ELO ganz oben
+    mini_lb(active, "G_ELO", "Gesamt Leaderboard")
 
-    mini_lb(players[players.Spiele   > 0], "ELO",   "Einzel – Ranking", height=175)
-    mini_lb(players[players.D_Spiele > 0], "D_ELO", "Doppel – Ranking", height=175)
-    mini_lb(players[players.R_Spiele > 0], "R_ELO", "Rundlauf – Ranking", height=175)
+    # Scroll-Container: Leaderboards inline ohne Zeilenumbruch
+    st.markdown(
+        '<div style="display:flex; gap:0.5rem; overflow-x:auto; white-space:nowrap;">',
+        unsafe_allow_html=True,
+    )
+    cols = st.columns([1,1,1], gap="small")
+    with cols[0]:
+        st.markdown('<div style="min-width:100px;">', unsafe_allow_html=True)
+        mini_lb(players[players.Spiele   > 0], "ELO",   "Einzel",  height=175)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with cols[1]:
+        st.markdown('<div style="min-width:100px;">', unsafe_allow_html=True)
+        mini_lb(players[players.D_Spiele > 0], "D_ELO", "Doppel", height=175)
+        st.markdown('</div>', unsafe_allow_html=True)
+    with cols[2]:
+        st.markdown('<div style="min-width:100px;">', unsafe_allow_html=True)
+        mini_lb(players[players.R_Spiele > 0], "R_ELO", "Rundlauf",height=175)
+        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
     # --- Pending Confirmation Counts ------------------------------
@@ -819,7 +844,10 @@ if st.session_state.view_mode == "home":
                         pending.at[idx, "confB"] = True
                     # When both have confirmed, move to matches and update Elo incrementally
                     if pending.at[idx, "confA"] and pending.at[idx, "confB"]:
-                        row = pending.loc[idx]
+                        row = pending.loc[idx].copy()
+                        # Fallback: wenn Datum fehlt, neu setzen
+                        if pd.isna(row["Datum"]):
+                            row["Datum"] = datetime.now(ZoneInfo("Europe/Berlin"))
                         # Add to confirmed matches
                         matches.loc[len(matches)] = row[pending.columns[:-2]]
                         pending.drop(idx, inplace=True)
@@ -888,7 +916,10 @@ if st.session_state.view_mode == "home":
                         pending_d.at[idx, "confB"] = True
                     # Wenn beide Teams bestätigt haben, zum finalen DataFrame verschieben
                     if pending_d.at[idx, "confA"] and pending_d.at[idx, "confB"]:
-                        row = pending_d.loc[idx]
+                        row = pending_d.loc[idx].copy()
+                        # Fallback: wenn Datum fehlt, neu setzen
+                        if pd.isna(row["Datum"]):
+                            row["Datum"] = datetime.now(ZoneInfo("Europe/Berlin"))
                         # Bestätigte Doppel in die Hauptliste
                         doubles.loc[len(doubles)] = row[pending_d.columns[:-2]]
                         pending_d.drop(idx, inplace=True)
@@ -945,7 +976,10 @@ if st.session_state.view_mode == "home":
                     save_csv(pending_r, PENDING_R)
                     # Erst bei 3 Bestätigungen Spiel in Rundenliste verschieben
                     if len(confirmed) >= 3:
-                        row = pending_r.loc[idx]
+                        row = pending_r.loc[idx].copy()
+                        # Fallback: wenn Datum fehlt, neu setzen
+                        if pd.isna(row["Datum"]):
+                            row["Datum"] = datetime.now(ZoneInfo("Europe/Berlin"))
                         rounds.loc[len(rounds)] = row[pending_r.columns[:-1]]
                         pending_r.drop(idx, inplace=True)
                         save_csv(rounds, ROUNDS)
