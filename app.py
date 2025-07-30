@@ -60,7 +60,10 @@ if USE_GSHEETS:
         spread_id = st.secrets.get("spread_id", "")
         if spread_id:
             return gc_local.open_by_key(spread_id)
-        return gc_local.open("tt_elo")
+
+        # live / dev umschalten:
+        return gc_local.open("tt_elo")    # Produktion
+        # return gc_local.open("ttelodev")    # Dev-Umgebung
 
     sh = _get_sheet()  # einmal pro Session
 
@@ -593,15 +596,56 @@ current_player = st.session_state.current_player
 # region Home Ansicht
 if st.session_state.view_mode == "home":
     st.title("🏓 Tischtennis-Dashboard")
+    # Mobile: Metrics schmaler machen, damit sie in einer Zeile bleiben und Schriftgrößen anpassen
+    st.markdown(
+        """
+        <style>
+        /* Flex metrics */
+        [data-testid="metric-container"] {
+            flex: none !important;
+            width: 30% !important;
+            padding: 0.2rem !important;
+        }
+        /* Label text */
+        [data-testid="metric-container"] > div:first-child p {
+            font-size: 0.8rem !important;
+        }
+        /* Value text */
+        [data-testid="metric-container"] > div:nth-child(2) p {
+            font-size: 1.2rem !important;
+            line-height: 1.1 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     user = players.loc[players.Name == current_player].iloc[0]
 
     st.markdown(f"### Willkommen, **{current_player}**!")
-    st.metric("Gesamt-ELO", int(user.G_ELO))
-
-    cols = st.columns(3)
-    cols[0].metric("Einzel",  int(user.ELO))
-    cols[1].metric("Doppel",  int(user.D_ELO))
-    cols[2].metric("Rundlauf", int(user.R_ELO))
+    # Gesamt-ELO zentriert, darunter Einzel/Doppel/Rundlauf nebeneinander
+    html = f"""
+    <!-- Gesamt-ELO zentriert -->
+    <div style="text-align:center; margin-bottom:1rem;">
+      <p style="font-size:1.2rem; margin:0;">ELO</p>
+      <p style="font-size:1.8rem; margin:0; font-weight:bold;">{int(user.G_ELO)}</p>
+    </div>
+    <!-- Einzel/Doppel/Rundlauf nebeneinander -->
+    <div style="display:flex; gap:1rem; justify-content:center;">
+      <div style="flex:1; min-width:0; text-align:center;">
+        <p style="font-size:1.2rem; margin:0;">Einzel</p>
+        <p style="font-size:1.8rem; margin:0; font-weight:bold;">{int(user.ELO)}</p>
+      </div>
+      <div style="flex:1; min-width:0; text-align:center;">
+        <p style="font-size:1.2rem; margin:0;">Doppel</p>
+        <p style="font-size:1.8rem; margin:0; font-weight:bold;">{int(user.D_ELO)}</p>
+      </div>
+      <div style="flex:1; min-width:0; text-align:center;">
+        <p style="font-size:1.2rem; margin:0;">Rundlauf</p>
+        <p style="font-size:1.8rem; margin:0; font-weight:bold;">{int(user.R_ELO)}</p>
+      </div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
 
     st.divider()
 
@@ -619,7 +663,7 @@ if st.session_state.view_mode == "home":
 
         # Highlightfunktion
         def _highlight(row):
-            return ['background-color: #fff3b0' if row["Name"] == current_player else '' for _ in row]
+            return ['background-color: #d9eaf7; color: black' if row["Name"] == current_player else '' for _ in row]
 
         styled = tab.style.apply(_highlight, axis=1)
 
