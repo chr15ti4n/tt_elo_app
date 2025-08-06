@@ -1,7 +1,5 @@
-streamlit
-pandas
-matplotlib
+streamlit>=1.30
+supabase>=2.5
+pandas>=2.0
 bcrypt
-qrcode
-gspread
-gspread_dataframe
+pathlib
