@@ -1,1350 +1,1332 @@
-# region Imports
+# region imports
+from __future__ import annotations
 import streamlit as st
- # Admin user(s) for manual full rebuild
-ADMINS = ["Chris"]
-from contextlib import contextmanager
-import numpy as np
-
-@contextmanager
-def ui_container(title: str):
-    """Use st.modal if available, else st.expander fallback."""
-    if hasattr(st, "modal"):
-        with st.modal(title):
-            yield
-    else:
-        with st.expander(title, expanded=True):
-            yield
-            
 import pandas as pd
-from pathlib import Path
-from datetime import datetime
-from zoneinfo import ZoneInfo 
+from zoneinfo import ZoneInfo
+from typing import Optional
 import bcrypt
-# QR-Code generation
-import qrcode
-# Google Sheets
-import os
-import functools
-import time
-import gspread
-from gspread_dataframe import get_as_dataframe, set_with_dataframe
-
-# region Paths
-# ---------- Konstante Pfade ----------
-PLAYERS = Path("players.csv")
-MATCHES = Path("matches.csv")
-PENDING = Path("pending_matches.csv")
-PENDING_D = Path("pending_doubles.csv")
-DOUBLES   = Path("doubles.csv")
-PENDING_R = Path("pending_rounds.csv")  
-ROUNDS    = Path("rounds.csv")          
+import uuid
+from supabase import create_client
 # endregion
 
-
-# ---------- QR-Code für Schnellzugriff ----------
-QR_FILE = Path("form_qr.png")
-APP_URL  = "https://tt-elo.streamlit.app"
-if not QR_FILE.exists():
-    qr_img = qrcode.make(APP_URL)
-    qr_img.save(QR_FILE)
-
-# ---------- Google Sheets ----------
-USE_GSHEETS = "gcp" in st.secrets  # Nur aktiv, wenn Service‑Account‑Creds hinterlegt
-
-# Google Sheets Caching/Singleton helpers
-if USE_GSHEETS:
-
-    @st.cache_resource
-    def _get_sheet():
-        gc_local = gspread.service_account_from_dict(st.secrets["gcp"])
-        spread_id = st.secrets.get("spread_id", "")
-        if spread_id:
-            return gc_local.open_by_key(spread_id)
-
-        # live / dev umschalten:
-        return gc_local.open("tt_elo")    # Produktion
-
-    sh = _get_sheet()  # einmal pro Session
-
-    SHEET_NAMES = {
-        "players.csv":  "players",
-        "matches.csv":  "matches",
-        "pending_matches.csv": "pending_matches",
-        "pending_doubles.csv": "pending_doubles",
-        "doubles.csv":  "doubles",
-        "pending_rounds.csv": "pending_rounds",
-        "rounds.csv":   "rounds",
-    }
-
-    @functools.lru_cache(maxsize=None)
-    def _get_ws(name: str, cols: list[str]):
-        """Gibt Worksheet‑Objekt; legt es bei Bedarf an (cached)."""
-        try:
-            return sh.worksheet(name)
-        except gspread.WorksheetNotFound:
-            return sh.add_worksheet(name, rows=1000, cols=len(cols))
+# region app_setup
+st.set_page_config(page_title="AK-Tischtennis", page_icon="🏓", layout="wide")
+TZ = ZoneInfo("Europe/Berlin")
 # endregion
 
+# region supabase
+@st.cache_resource
+def get_supabase():
+    """Erzeugt den Supabase-Client aus den Streamlit-Secrets.
+    Schlägt mit einer Exception fehl, wenn Secrets fehlen oder das Paket nicht installiert ist.
+    """
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
 
-# region Helper Functions
-# ---------- Hilfsfunktionen ----------
+sp = get_supabase()
+# endregion
 
-# --------- Session‑Cache für DataFrames (verhindert unnötige Sheets‑Reads) ---------
-if "dfs" not in st.session_state:   # Key: Path.name  |  Value: DataFrame
-    st.session_state["dfs"] = {}
-
-def save_csv(df: pd.DataFrame, path: Path):
-    """Speichert DataFrame entweder als lokale CSV oder in Google‑Sheets."""
-    if USE_GSHEETS and path.name in SHEET_NAMES:
-        ws_name = SHEET_NAMES[path.name]
-        ws = _get_ws(ws_name, tuple(df.columns))
-        # gspread verträgt keine Datetime‑Objekte → zuerst in Strings wandeln
-        df_to_write = df.copy()
-        for col in df_to_write.select_dtypes(include=["datetimetz", "datetime64[ns, UTC]", "datetime64[ns]"]).columns:
-            df_to_write[col] = df_to_write[col].dt.strftime("%Y-%m-%d %H:%M:%S")
-        # Google Sheets kann kein NaN serialisieren → NaN durch leere Strings ersetzen
-        df_to_write = df_to_write.fillna("")
-        ws.clear()
-        set_with_dataframe(ws, df_to_write.reset_index(drop=True))
-        # Cache aktualisieren
-        st.session_state["dfs"][path.name] = df.copy()
-        time.sleep(0.1)  # Throttle to avoid hitting per‑minute quota
-    else:
-        df.to_csv(path, index=False)
-        # Cache aktualisieren
-        st.session_state["dfs"][path.name] = df.copy()
-
-
-def load_or_create(path: Path, cols: list[str]) -> pd.DataFrame:
-    """Lädt DataFrame aus CSV oder Google‑Sheets; legt bei Bedarf leere Tabelle an."""
-    # Zuerst Session‑Cache prüfen
-    if path.name in st.session_state["dfs"]:
-        return st.session_state["dfs"][path.name]
-
-    if USE_GSHEETS and path.name in SHEET_NAMES:
-        ws = _get_ws(SHEET_NAMES[path.name], tuple(cols))
-        df = get_as_dataframe(ws).dropna(how="all")
-        # Falls Sheet gerade frisch angelegt → Kopfzeile schreiben
-        if df.empty and ws.row_count == 0:
-            set_with_dataframe(ws, pd.DataFrame(columns=cols))
-            df = pd.DataFrame(columns=cols)
-            st.session_state["dfs"][path.name] = df.copy()
-            return df
-        result_df = df if not df.empty else pd.DataFrame(columns=cols)
-        st.session_state["dfs"][path.name] = result_df.copy()
-        return result_df
-    else:
-        if path.exists():
-            df = pd.read_csv(path)
-            st.session_state["dfs"][path.name] = df.copy()
-            return df
-        df = pd.DataFrame(columns=cols)
-        st.session_state["dfs"][path.name] = df.copy()
+# region data_loading
+@st.cache_data(ttl=30)
+def load_table(table_name: str) -> pd.DataFrame:
+    """Lädt eine Supabase-Tabelle vollständig in ein DataFrame.
+    - Spaltennamen -> lower()
+    - 'datum' -> Europe/Berlin
+    - Bei Fehler (z. B. Tabelle existiert nicht) leeres DF
+    """
+    try:
+        res = sp.table(table_name).select("*").execute()
+        data = res.data or []
+    except Exception:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    if df.empty:
         return df
-
-def calc_elo(r_a, r_b, score_a, k=32):
-    """ELO‑Formel mit Punktdifferenz.
-    score_a ∈ [0,1]   1 = 11:0   0.09 ≈ 11:10   0 = Niederlage"""
-    exp_a = 1 / (1 + 10 ** ((r_b - r_a) / 400))
-    return round(r_a + k * (score_a - exp_a), 0)
-
-# --------- Gesamt-ELO berechnen -----------
-def compute_gelo(df: pd.DataFrame,
-                 w_e=0.6, w_d=0.25, w_r=0.15) -> pd.DataFrame:
-    df["G_ELO"] = (
-        w_e * df["ELO"] +
-        w_d * df["D_ELO"] +
-        w_r * df["R_ELO"]
-    ).round(0).astype(int)
+    df.columns = [str(c).lower() for c in df.columns]
+    if "datum" in df.columns:
+        df["datum"] = pd.to_datetime(df["datum"], errors="coerce", utc=True).dt.tz_convert(TZ)
     return df
+
+def clear_table_cache():
+    load_table.clear()
 # endregion
 
-# region PIN Hashing
-# ---------- PIN-Hashing ----------
+# region auth_helpers
 def hash_pin(pin: str) -> str:
     return bcrypt.hashpw(pin.encode(), bcrypt.gensalt()).decode()
 
-def check_pin(pin: str, stored: str) -> bool:
+def check_pin(entered: str, stored: str) -> bool:
+    """Vergleicht eingegebene PIN mit gespeichertem Wert (unterstützt Legacy-Klartext)."""
+    if stored and (stored.startswith("$2b$") or stored.startswith("$2a$")):
+        try:
+            return bcrypt.checkpw(entered.encode(), stored.encode())
+        except Exception:
+            return False
+    return entered == (stored or "")
+
+def norm_name(s: str) -> str:
+    """Normalisiert Namen für Vergleiche: entfernt alle Whitespaces und macht lowercase."""
+    if s is None:
+        return ""
+    return "".join(str(s).split()).lower()
+
+def find_player_by_name_normalized(name: str):
+    """Sucht einen Spieler, wobei Groß/Kleinschreibung und Leerzeichen ignoriert werden."""
+    target = norm_name(name)
+    try:
+        res = sp.table("players").select("id,name,pin,auto_token").execute()
+        for rec in (res.data or []):
+            if norm_name(rec.get("name", "")) == target:
+                return rec
+    except Exception:
+        pass
+    return None
+
+def try_auto_login_from_query():
+    """Auto-Login via URL-Parameter ?user=&token= (wenn players.auto_token vorhanden).
+    Greift nur, wenn noch nicht eingeloggt.
     """
-    Vergleicht die eingegebene PIN mit dem gespeicherten Wert.
-    Unterstützt sowohl Klartext (Legacy) als auch bcrypt-Hashes.
-    """
-    if stored.startswith("$2b$") or stored.startswith("$2a$"):
-        # bcrypt-Hash
-        return bcrypt.checkpw(pin.encode(), stored.encode())
-    else:
-        # Legacy: Klartext
-        return pin == stored
+    if st.session_state.get("logged_in"):
+        return
+    q = st.query_params
+    if "user" not in q or "token" not in q:
+        return
+    user = q.get("user")
+    token = q.get("token")
+    rec = find_player_by_name_normalized(user)
+    if not rec:
+        return
+    if str(rec.get("auto_token", "")) == str(token):
+        st.session_state.logged_in = True
+        st.session_state.player_id = rec.get("id")
+        st.session_state.player_name = rec.get("name")
+        # Entferne sensible Query-Parameter aus der URL und lade sauber neu
+        try:
+            st.query_params.clear()
+            st.rerun()
+        except Exception:
+            pass
+
 # endregion
 
-# region Rebuild Players (Einzel)
-# ---------- Spieler-Stats & ELO komplett neu berechnen ----------
-def rebuild_players(players_df: pd.DataFrame, matches_df: pd.DataFrame, k: int = 64) -> pd.DataFrame:
-    """
-    Setzt alle Spieler-Statistiken zurück und berechnet sie anhand der
-    chronologisch sortierten Match-Liste neu.
-    """
-    players_df = players_df.copy()
-    # Basiswerte zurücksetzen
-    players_df[["ELO", "Siege", "Niederlagen", "Spiele"]] = 0
-    players_df["ELO"] = 1200
+# region player_helpers
 
-    if matches_df.empty:
-        return players_df
+def get_current_user() -> dict | None:
+    """Lädt den aktuell eingeloggten Spieler-Datensatz frisch aus Supabase."""
+    try:
+        pid = st.session_state.get("player_id")
+        if not pid:
+            return None
+        rec = sp.table("players").select("*").eq("id", pid).single().execute().data
+        return rec
+    except Exception:
+        return None
 
-    # Matches nach Datum aufsteigend sortieren
-    matches_sorted = matches_df.sort_values("Datum")
+@st.cache_data(ttl=30)
+def get_player_maps():
+    """Gibt (id_to_name, name_to_id) basierend auf der players-Tabelle zurück."""
+    df = load_table("players")
+    id_to_name = {}
+    name_to_id = {}
+    if not df.empty:
+        for _, r in df.iterrows():
+            pid = str(r.get("id"))
+            nm = str(r.get("name"))
+            if pid and nm:
+                id_to_name[pid] = nm
+                name_to_id[nm] = pid
+    return id_to_name, name_to_id
 
-    for _, row in matches_sorted.iterrows():
-        a, b = row["A"], row["B"]
-        pa, pb = int(row["PunkteA"]), int(row["PunkteB"])
 
-        # Falls Spieler inzwischen gelöscht wurden, Match überspringen
-        if a not in players_df["Name"].values or b not in players_df["Name"].values:
-            continue
+@st.cache_data(ttl=30)
+def table_has_creator(table: str) -> bool:
+    """Prüft, ob die Pending-Tabelle eine Spalte 'creator' hat."""
+    try:
+        sp.table(table).select("creator").limit(1).execute()
+        return True
+    except Exception:
+        return False
 
-        r_a = players_df.loc[players_df["Name"] == a, "ELO"].iat[0]
-        r_b = players_df.loc[players_df["Name"] == b, "ELO"].iat[0]
-
-        if pa == pb:
-            continue  # Unentschieden ignorieren
-        # K‑Faktor skalieren nach Punktdifferenz
-        margin  = abs(pa - pb)            # 0–11
-        k_eff   = k * (1 + margin / 11)   # 0‑Siege → K, 11‑0 → 2·K
-        winner_is_a = pa > pb
-
-        new_r_a = calc_elo(r_a, r_b, 1 if winner_is_a else 0, k_eff)
-        new_r_b = calc_elo(r_b, r_a, 0 if winner_is_a else 1, k_eff)
-
-        # --- Statistiken (ganze Siege/Niederlagen, 1 Spiel) ----------------
-        if pa > pb:
-            win_a, win_b = 1, 0
-        else:
-            win_a, win_b = 0, 1
-
-        players_df.loc[players_df["Name"] == a, ["ELO", "Siege", "Niederlagen", "Spiele"]] = [
-            new_r_a,
-            players_df.loc[players_df["Name"] == a, "Siege"].iat[0] + win_a,
-            players_df.loc[players_df["Name"] == a, "Niederlagen"].iat[0] + win_b,
-            players_df.loc[players_df["Name"] == a, "Spiele"].iat[0] + 1,
-        ]
-        players_df.loc[players_df["Name"] == b, ["ELO", "Siege", "Niederlagen", "Spiele"]] = [
-            new_r_b,
-            players_df.loc[players_df["Name"] == b, "Siege"].iat[0] + win_b,
-            players_df.loc[players_df["Name"] == b, "Niederlagen"].iat[0] + win_a,
-            players_df.loc[players_df["Name"] == b, "Spiele"].iat[0] + 1,
-        ]
-    players_df = compute_gelo(players_df)
-    return players_df
 # endregion
 
-# region Doppel ELO Helper
-# ---------- Doppel-ELO ----------
-def calc_doppel_elo(r1, r2, opp_avg, s, k=24):
+# region game_helpers
+from datetime import datetime
+
+def _utc_iso(ts) -> str:
+    return pd.Timestamp(ts).tz_convert("UTC").isoformat()
+
+
+# --- ELO: Utilities (aus alter Datei adaptiert) ---
+
+
+def _compute_gelo_from_parts(elo: int, d_elo: int, r_elo: int) -> int:
+    # 0.6 Einzel, 0.25 Doppel, 0.15 Rundlauf
+    return int(round(0.6 * int(elo) + 0.25 * int(d_elo) + 0.15 * int(r_elo)))
+
+
+# --- Dynamische G-ELO-Berechnung nach Spielanteilen ---
+def _compute_gelo_dynamic(elo:int, d_elo:int, r_elo:int, n_e:int, n_d:int, n_r:int) -> int:
+    """Berechnet G‑ELO nach Spielanteilen.
+    Gewichte = Anteil der jeweiligen Spielanzahl; spielt jemand einen Modus nicht, zählt er 0.
+    """
+    total = n_e + n_d + n_r
+    if total == 0:
+        return int(round((elo + d_elo + r_elo)/3))  # Fallback, sollte nie passieren
+    w_e, w_d, w_r = n_e/total, n_d/total, n_r/total
+    return int(round(w_e*elo + w_d*d_elo + w_r*r_elo))
+
+
+def calc_elo(r_a: float, r_b: float, score_a: float, k: float = 64) -> int:
+    """ELO-Formel mit Erwartungswert; k wird außerhalb ggf. um Margenfaktor skaliert."""
+    exp_a = 1 / (1 + 10 ** ((r_b - r_a) / 400))
+    return int(round(r_a + k * (score_a - exp_a)))
+
+
+def calc_doppel_elo(r1: float, r2: float, opp_avg: float, s: float, k: float = 48) -> tuple[int, int]:
     team_avg = (r1 + r2) / 2
     exp = 1 / (1 + 10 ** ((opp_avg - team_avg) / 400))
     delta = k * (s - exp)
-    return round(r1 + delta), round(r2 + delta)
+    return int(round(r1 + delta)), int(round(r2 + delta))
 
-# ---------- Daten laden ----------
-players = load_or_create(PLAYERS, ["Name", "ELO", "Siege", "Niederlagen", "Spiele", "Pin"])
-# Falls alte CSV noch keine Pin‑Spalte hatte
-if "Pin" not in players.columns:
-    players["Pin"] = ""
-# Doppel-Spalten ergänzen
-for col in ["D_ELO", "D_Siege", "D_Niederlagen", "D_Spiele"]:
-    if col not in players.columns:
-        players[col] = 1200 if col == "D_ELO" else 0
-# Rundlauf-Spalten ergänzen
-for col in ["R_ELO", "R_Siege", "R_Zweite", "R_Niederlagen", "R_Spiele"]:
-    if col not in players.columns:
-        players[col] = 1200 if col == "R_ELO" else 0
-        
-players = compute_gelo(players)
-# Daten laden
-matches = load_or_create(MATCHES, ["Datum", "A", "B", "PunkteA", "PunkteB"])
-pending = load_or_create(PENDING, ["Datum", "A", "B", "PunkteA", "PunkteB", "confA", "confB"])
-pending_d = load_or_create(PENDING_D, ["Datum","A1","A2","B1","B2","PunkteA","PunkteB","confA","confB"])
-doubles   = load_or_create(DOUBLES,   ["Datum","A1","A2","B1","B2","PunkteA","PunkteB"])
-pending_r = load_or_create(PENDING_R, ["Datum","Teilnehmer","Finalist1","Finalist2","Sieger","creator","confirmed_by"])
-# -- Kompatibilität älterer CSV-Versionen --
-if "confirmed_by" not in pending_r.columns:
-    if "conf" in pending_r.columns:
-        pending_r = pending_r.rename(columns={"conf": "confirmed_by"})
-    else:
-        pending_r["confirmed_by"] = ""
-    save_csv(pending_r, PENDING_R)
-rounds    = load_or_create(ROUNDS,    ["Datum","Teilnehmer","Finalist1","Finalist2","Sieger"])
-
-# Ensure confA/confB are boolean for logical operations
-pending["confA"]   = pending["confA"].astype(bool)
-pending["confB"]   = pending["confB"].astype(bool)
-pending_d["confA"] = pending_d["confA"].astype(bool)
-pending_d["confB"] = pending_d["confB"].astype(bool)
-
-# Always convert Datum to pandas datetime with Berlin timezone
-for df in (matches, pending, pending_d, doubles, pending_r, rounds):
-    df["Datum"] = pd.to_datetime(df["Datum"], utc=True, errors="coerce")\
-                       .dt.tz_convert("Europe/Berlin")
-# endregion
-
-# region Doppel ELO Rebuild
-# ---------- Doppel-Stats & ELO komplett neu berechnen ----------
-def rebuild_players_d(players_df, doubles_df, k=48):
-    players_df = players_df.copy()
-    players_df[["D_ELO","D_Siege","D_Niederlagen","D_Spiele"]] = 0
-    players_df["D_ELO"] = 1200
-    for _, row in doubles_df.sort_values("Datum").iterrows():
-        a1,a2,b1,b2 = row[["A1","A2","B1","B2"]]
-        pa,pb = int(row["PunkteA"]), int(row["PunkteB"])
-        ra1 = players_df.loc[players_df.Name==a1,"D_ELO"].iat[0]
-        ra2 = players_df.loc[players_df.Name==a2,"D_ELO"].iat[0]
-        rb1 = players_df.loc[players_df.Name==b1,"D_ELO"].iat[0]
-        rb2 = players_df.loc[players_df.Name==b2,"D_ELO"].iat[0]
-        a_avg,b_avg = (ra1+ra2)/2, (rb1+rb2)/2
-        if pa == pb:
-            continue  # kein Unentschieden
-        margin  = abs(pa - pb)
-        k_eff   = k * (1 + margin / 11)
-        team_a_win = 1 if pa > pb else 0
-
-        nr1, nr2 = calc_doppel_elo(ra1, ra2, b_avg, team_a_win, k_eff)
-        nr3, nr4 = calc_doppel_elo(rb1, rb2, a_avg, 1 - team_a_win, k_eff)
-        updates = [
-            (a1, nr1, team_a_win),
-            (a2, nr2, team_a_win),
-            (b1, nr3, 1 - team_a_win),
-            (b2, nr4, 1 - team_a_win),
-        ]
-        for p,new,s in updates:
-            players_df.loc[players_df.Name==p, ["D_ELO","D_Siege","D_Niederlagen","D_Spiele"]] = [
-                new,
-                players_df.loc[players_df.Name==p,"D_Siege"].iat[0] + s,
-                players_df.loc[players_df.Name==p,"D_Niederlagen"].iat[0] + (1 - s),
-                players_df.loc[players_df.Name==p,"D_Spiele"].iat[0] + 1,
-            ]
-    players_df = compute_gelo(players_df)
-    return players_df
-# endregion
-
-# region Rundlauf ELO
-# ---------- Rundlauf-ELO ----------
-def calc_round_elo(r, avg, s, k=48):
-    """
-    r      ... Rating des Spielers
-    avg    ... Durchschnittsrating aller Teilnehmer
-    s      ... Ergebnis (1 Sieger, 0.5 Zweiter, 0 Verlierer)
-    """
+# --- Rundlauf-ELO ---
+def calc_round_elo(r: float, avg: float, s: float, k: int = 48) -> int:
+    """Rundlauf-ELO: Sieger=1, Zweiter=0.5, andere=0."""
     exp = 1 / (1 + 10 ** ((avg - r) / 400))
-    return round(r + k * (s - exp))
+    return int(round(r + k * (s - exp)))
 
-# ---------- Rundlauf-Stats & ELO komplett neu berechnen ----------
-def rebuild_players_r(players_df, rounds_df, k=48):
-    players_df = players_df.copy()
-    players_df[["R_ELO","R_Siege","R_Zweite","R_Niederlagen","R_Spiele"]] = 0
-    players_df["R_ELO"] = 1200
-    if rounds_df.empty:
-        return players_df
-    for _, row in rounds_df.sort_values("Datum").iterrows():
-        teilnehmer = row["Teilnehmer"].split(";")
-        fin1, fin2, winner = row["Finalist1"], row["Finalist2"], row["Sieger"]
-        avg = players_df.loc[players_df.Name.isin(teilnehmer), "R_ELO"].mean()
-        deltas = {}
-        for p in teilnehmer:
-            old = players_df.loc[players_df.Name==p,"R_ELO"].iat[0]
-            if p == winner:
-                s = 1
-                players_df.loc[players_df.Name==p,"R_Siege"] += 1
-            elif p in (fin1, fin2):
+def update_round_after_confirm_id(participant_ids: list[str], fin1_id: str, fin2_id: str, winner_id: str, k: int = 48) -> None:
+    """Aktualisiert r_elo/Stats und g_elo aller Teilnehmer eines Rundlaufs (ID-basiert)."""
+    # 1) Aktuelle Werte holen
+    current = {}
+    for pid in participant_ids:
+        rec = sp.table("players").select("id, name, r_elo, r_siege, r_zweite, r_niederlagen, r_spiele, elo, spiele, d_spiele, d_elo").eq("id", pid).single().execute().data
+        if rec:
+            current[str(pid)] = rec
+    if not current:
+        return
+    # 2) Durchschnitt berechnen (auf Basis r_elo vor Update)
+    avg = float(pd.Series([float(v.get("r_elo", 1200)) for v in current.values()]).mean())
+    # 3) Für jeden Spieler neues r_elo + Stats
+    for pid, rec in current.items():
+        old_r = float(rec.get("r_elo", 1200))
+        if pid == str(winner_id):
+            s = 1.0
+            inc = {"r_siege": 1, "r_zweite": 0, "r_niederlagen": 0}
+        elif pid in (str(fin1_id), str(fin2_id)):
+            # Wenn nicht Gewinner, aber Finalist → Zweiter
+            if pid != str(winner_id):
                 s = 0.5
-                players_df.loc[players_df.Name==p,"R_Zweite"] += 1
+                inc = {"r_siege": 0, "r_zweite": 1, "r_niederlagen": 0}
             else:
-                s = 0
-                players_df.loc[players_df.Name==p,"R_Niederlagen"] += 1
-            exp = 1 / (1 + 10 ** ((avg - old) / 400))
-            delta = k * (s - exp)
-            deltas[p] = delta
-        # Null‑Summe: Offset so dass Summe(delta_adj) = 0
-        offset = sum(deltas.values()) / len(deltas)
-        for p, delta in deltas.items():
-            new = round(players_df.loc[players_df.Name==p,"R_ELO"].iat[0] + (delta - offset))
-            players_df.loc[players_df.Name==p,"R_ELO"] = new
-            players_df.loc[players_df.Name==p,"R_Spiele"] += 1
-    players_df = compute_gelo(players_df)
-    return players_df
+                s = 1.0
+                inc = {"r_siege": 1, "r_zweite": 0, "r_niederlagen": 0}
+        else:
+            s = 0.0
+            inc = {"r_siege": 0, "r_zweite": 0, "r_niederlagen": 1}
+        new_r = calc_round_elo(old_r, avg, s, k)
+        payload = {
+            "r_elo": int(new_r),
+            "r_siege": int(rec.get("r_siege", 0)) + inc["r_siege"],
+            "r_zweite": int(rec.get("r_zweite", 0)) + inc["r_zweite"],
+            "r_niederlagen": int(rec.get("r_niederlagen", 0)) + inc["r_niederlagen"],
+            "r_spiele": int(rec.get("r_spiele", 0)) + 1,
+        }
+        payload["g_elo"] = _compute_gelo_dynamic(
+            int(rec.get("elo", 1200)),
+            int(rec.get("d_elo", 1200)),
+            payload["r_elo"],
+            int(rec.get("spiele", 0)),
+            int(rec.get("d_spiele", 0)),
+            payload["r_spiele"],
+        )
+        sp.table("players").update(payload).eq("id", pid).execute()
+
+
+def update_single_after_confirm_id(a_id: str, b_id: str, pa: int, pb: int, k_base: int = 64) -> None:
+    if int(pa) == int(pb):
+        return
+    a = sp.table("players").select("id, elo, siege, niederlagen, spiele, d_spiele, r_spiele, d_elo, r_elo").eq("id", a_id).single().execute().data
+    b = sp.table("players").select("id, elo, siege, niederlagen, spiele, d_spiele, r_spiele, d_elo, r_elo").eq("id", b_id).single().execute().data
+    if not a or not b:
+        return
+    r_a, r_b = float(a.get("elo", 1200)), float(b.get("elo", 1200))
+    margin = abs(int(pa) - int(pb))  # 0–11
+    k_eff = k_base * (1 + margin / 11)
+    winner_is_a = int(pa) > int(pb)
+    new_r_a = calc_elo(r_a, r_b, 1 if winner_is_a else 0, k_eff)
+    new_r_b = calc_elo(r_b, r_a, 0 if winner_is_a else 1, k_eff)
+    a_payload = {
+        "elo": new_r_a,
+        "siege": int(a.get("siege", 0)) + (1 if winner_is_a else 0),
+        "niederlagen": int(a.get("niederlagen", 0)) + (0 if winner_is_a else 1),
+        "spiele": int(a.get("spiele", 0)) + 1,
+    }
+    b_payload = {
+        "elo": new_r_b,
+        "siege": int(b.get("siege", 0)) + (0 if winner_is_a else 1),
+        "niederlagen": int(b.get("niederlagen", 0)) + (1 if winner_is_a else 0),
+        "spiele": int(b.get("spiele", 0)) + 1,
+    }
+    a_payload["g_elo"] = _compute_gelo_dynamic(
+        a_payload["elo"],
+        int(a.get("d_elo", 1200)),
+        int(a.get("r_elo", 1200)),
+        a_payload["spiele"],
+        int(a.get("d_spiele", 0)),
+        int(a.get("r_spiele", 0)),
+    )
+    b_payload["g_elo"] = _compute_gelo_dynamic(
+        b_payload["elo"],
+        int(b.get("d_elo", 1200)),
+        int(b.get("r_elo", 1200)),
+        b_payload["spiele"],
+        int(b.get("d_spiele", 0)),
+        int(b.get("r_spiele", 0)),
+    )
+    sp.table("players").update(a_payload).eq("id", a_id).execute()
+    sp.table("players").update(b_payload).eq("id", b_id).execute()
+
+
+def update_double_after_confirm_id(a1_id: str, a2_id: str, b1_id: str, b2_id: str, pa: int, pb: int, k_base: int = 48) -> None:
+    if int(pa) == int(pb):
+        return
+    A1 = sp.table("players").select("id, d_elo, d_siege, d_niederlagen, d_spiele, elo, spiele, r_spiele, r_elo").eq("id", a1_id).single().execute().data
+    A2 = sp.table("players").select("id, d_elo, d_siege, d_niederlagen, d_spiele, elo, spiele, r_spiele, r_elo").eq("id", a2_id).single().execute().data
+    B1 = sp.table("players").select("id, d_elo, d_siege, d_niederlagen, d_spiele, elo, spiele, r_spiele, r_elo").eq("id", b1_id).single().execute().data
+    B2 = sp.table("players").select("id, d_elo, d_siege, d_niederlagen, d_spiele, elo, spiele, r_spiele, r_elo").eq("id", b2_id).single().execute().data
+    if not A1 or not A2 or not B1 or not B2:
+        return
+    ra1, ra2 = float(A1.get("d_elo", 1200)), float(A2.get("d_elo", 1200))
+    rb1, rb2 = float(B1.get("d_elo", 1200)), float(B2.get("d_elo", 1200))
+    a_avg, b_avg = (ra1 + ra2) / 2, (rb1 + rb2) / 2
+    margin = abs(int(pa) - int(pb))
+    k_eff = k_base * (1 + margin / 11)
+    team_a_win = 1 if int(pa) > int(pb) else 0
+    nr1, nr2 = calc_doppel_elo(ra1, ra2, b_avg, team_a_win, k_eff)
+    nr3, nr4 = calc_doppel_elo(rb1, rb2, a_avg, 1 - team_a_win, k_eff)
+    updates = [
+        (a1_id, A1, nr1, team_a_win),
+        (a2_id, A2, nr2, team_a_win),
+        (b1_id, B1, nr3, 1 - team_a_win),
+        (b2_id, B2, nr4, 1 - team_a_win),
+    ]
+    for pid, Rec, new_val, win in updates:
+        payload = {
+            "d_elo": int(new_val),
+            "d_siege": int(Rec.get("d_siege", 0)) + int(win),
+            "d_niederlagen": int(Rec.get("d_niederlagen", 0)) + (1 - int(win)),
+            "d_spiele": int(Rec.get("d_spiele", 0)) + 1,
+        }
+        payload["g_elo"] = _compute_gelo_dynamic(
+            int(Rec.get("elo", 1200)),
+            payload["d_elo"],
+            int(Rec.get("r_elo", 1200)),
+            int(Rec.get("spiele", 0)),
+            payload["d_spiele"],
+            int(Rec.get("r_spiele", 0)),
+        )
+        sp.table("players").update(payload).eq("id", pid).execute()
+
+
+# --- Neue create_pending_* Funktionen mit optionaler creator-Spalte ---
+
+def create_pending_single(creator_id: str, opponent_id: str, s_a: int, s_b: int, a_id: str | None = None):
+    """Erstellt ein Einzel-Pending.
+    - Wenn a_id None ist, spielt der Ersteller (a=creator_id) gegen opponent_id (b).
+    - Wenn a_id gesetzt ist, wird a=a_id und b=opponent_id; der Ersteller kann außen vor bleiben.
+    """
+    a_val = creator_id if a_id is None else a_id
+    payload = {
+        "datum": _utc_iso(pd.Timestamp.now(tz=TZ)),
+        "a": a_val, "b": opponent_id,
+        "punktea": int(s_a), "punkteb": int(s_b),
+        "confa": False, "confb": False,
+    }
+    if table_has_creator("pending_matches"):
+        payload["creator"] = creator_id
+    sp.table("pending_matches").insert(payload).execute()
+
+
+def create_pending_double(creator_id: str, partner_id: str, opp1_id: str, opp2_id: str, team_a_is_creator: bool = True):
+    """Erstellt ein Doppel-Pending.
+    - team_a_is_creator=True: Team A = (creator_id, partner_id)
+    - team_a_is_creator=False: Team A = (partner_id, opp1_id) und Team B = (opp2_id, creator_id) wird NICHT automatisch gesetzt; stattdessen erstellt der Ersteller nur für andere (A=partner_id+opp1_id, B=opp2_id+<zweiter Gegner>). In diesem Fall muss partner_id bereits beide Team-A-Spieler enthalten, daher verwenden wir partner_id als A2 und erwarten, dass opp1_id/opp2_id die Team‑B‑Spieler sind.
+    """
+    if team_a_is_creator:
+        a1, a2, b1, b2 = creator_id, partner_id, opp1_id, opp2_id
+    else:
+        # Ersteller spielt nicht mit → A = (partner_id, opp1_id), B = (opp2_id, irgendein anderer). Für UI-Varianten bauen wir unten einen zweiten Aufruf.
+        a1, a2, b1, b2 = partner_id, opp1_id, opp2_id, None  # b2 wird in der UI-Logik gesetzt
+    payload = {
+        "datum": _utc_iso(pd.Timestamp.now(tz=TZ)),
+        "a1": a1, "a2": a2, "b1": b1, "b2": b2,
+        "punktea": 0, "punkteb": 0,  # Scores werden aus der UI-Variante gesetzt
+        "confa": False, "confb": False,
+    }
+    if table_has_creator("pending_doubles"):
+        payload["creator"] = creator_id
+    # Insert erfolgt in der UI mit finalen Werten (wir überschreiben punktea/punkteb/b2 dort vor dem Insert)
+    return payload
+
+
+def create_pending_round(creator_id: str, participant_ids: list[str], fin1_id: str, fin2_id: str, winner_id: str):
+    """Erstellt ein Rundlauf-Pending mit Teilnehmern + Finalisten (1. und 2.) + Sieger."""
+    teilnehmer = ";".join([pid for pid in participant_ids if pid])
+    finalisten = ";".join([pid for pid in [fin1_id, fin2_id] if pid])
+    payload = {
+        "datum": _utc_iso(pd.Timestamp.now(tz=TZ)),
+        "teilnehmer": teilnehmer,
+        "finalisten": finalisten,
+        "sieger": winner_id,
+        "confa": False, "confb": False,
+    }
+    if table_has_creator("pending_rounds"):
+        payload["creator"] = creator_id
+    sp.table("pending_rounds").insert(payload).execute()
+
+# --- Confirm / Reject (ohne ELO-Update; das bauen wir im nächsten Schritt) ---
+
+def confirm_pending_single(row: pd.Series):
+    # Update ELO/Stats (IDs)
+    update_single_after_confirm_id(str(row["a"]), str(row["b"]), int(row["punktea"]), int(row["punkteb"]))
+    # Persist match
+    sp.table("matches").insert({
+        "datum": _utc_iso(pd.Timestamp(row["datum"])),
+        "a": row["a"], "b": row["b"],
+        "punktea": int(row["punktea"]), "punkteb": int(row["punkteb"]),
+    }).execute()
+    # Remove pending
+    sp.table("pending_matches").delete().eq("id", row["id"]).execute()
+
+
+def confirm_pending_double(row: pd.Series):
+    # Update ELO/Stats (IDs)
+    update_double_after_confirm_id(str(row["a1"]), str(row["a2"]), str(row["b1"]), str(row["b2"]), int(row["punktea"]), int(row["punkteb"]))
+    # Persist match
+    sp.table("doubles").insert({
+        "datum": _utc_iso(pd.Timestamp(row["datum"])),
+        "a1": row["a1"], "a2": row["a2"],
+        "b1": row["b1"], "b2": row["b2"],
+        "punktea": int(row["punktea"]), "punkteb": int(row["punkteb"]),
+    }).execute()
+    # Remove pending
+    sp.table("pending_doubles").delete().eq("id", row["id"]).execute()
+
+
+def confirm_pending_round(row: pd.Series):
+    # IDs aus Strings extrahieren
+    participant_ids = [pid for pid in str(row["teilnehmer"]).split(";") if pid]
+    fin_list = [pid for pid in str(row.get("finalisten") or "").split(";") if pid]
+    fin1_id = fin_list[0] if len(fin_list) > 0 else None
+    fin2_id = fin_list[1] if len(fin_list) > 1 else None
+    winner_id = str(row.get("sieger")) if row.get("sieger") else None
+    # ELO/Stats updaten (nur wenn alles vorhanden)
+    if participant_ids and fin1_id and fin2_id and winner_id:
+        update_round_after_confirm_id(participant_ids, fin1_id, fin2_id, winner_id)
+    # Persist in rounds
+    sp.table("rounds").insert({
+        "datum": _utc_iso(pd.Timestamp(row["datum"])),
+        "teilnehmer": row["teilnehmer"],
+        "finalisten": row.get("finalisten"),
+        "sieger": row.get("sieger"),
+    }).execute()
+    # Remove pending
+    sp.table("pending_rounds").delete().eq("id", row["id"]).execute()
+
+
+def reject_pending(table: str, id_: str):
+    sp.table(table).delete().eq("id", id_).execute()
+
 # endregion
 
+# region login_ui
+def login_register_ui():
+    """UI für Login & Registrierung (PIN-basiert) inkl. "Angemeldet bleiben".
+    Bei erstem Login aus Legacy-Klartext wird die PIN auf bcrypt migriert.
+    """
+    tabs = st.tabs(["Einloggen", "Registrieren"])    
 
-# region Auth & Sidebar UI
-# ---------- Login / Registrierung ----------
-# --- Modal flags (Einzel / Doppel / Rundlauf / Bestätigen) ---
-for _flag in ("show_single_modal", "show_double_modal", "show_round_modal", "show_confirm_modal"):
-    if _flag not in st.session_state:
-        st.session_state[_flag] = False
+    with tabs[0]:
+        name = st.text_input("Spielername", key="login_name")
+        pin = st.text_input("PIN", type="password", key="login_pin")
+        remember = st.checkbox("Angemeldet bleiben")
+        if st.button("Einloggen", type="primary"):
+            # Spieler holen
+            rec = find_player_by_name_normalized(name)
+            if not rec:
+                st.error("Spielername nicht gefunden.")
+                return
+            stored_pin = str(rec.get("pin", ""))
+            if not check_pin(pin, stored_pin):
+                st.error("PIN falsch.")
+                return
+            # ggf. Legacy -> bcrypt upgraden
+            if not (stored_pin.startswith("$2b$") or stored_pin.startswith("$2a$")):
+                try:
+                    sp.table("players").update({"pin": hash_pin(pin)}).eq("id", rec["id"]).execute()
+                except Exception:
+                    pass
+            # Session setzen
+            st.session_state.logged_in = True
+            st.session_state.player_id = rec.get("id")
+            st.session_state.player_name = rec.get("name")
 
-# -------- Modal helper: open one modal at a time ----------
-def _open_modal(which: str):
-    """Set exactly one modal flag True, others False."""
-    for f in ("show_single_modal", "show_double_modal", "show_round_modal", "show_confirm_modal"):
-        st.session_state[f] = (f == which)
+            # Remember-Me via auto_token + URL-Params
+            if remember:
+                try:
+                    token = uuid.uuid4().hex
+                    # Versuch: Spalte auto_token aktualisieren (falls nicht vorhanden, wird es fehlschlagen)
+                    sp.table("players").update({"auto_token": token}).eq("id", rec["id"]).execute()
+                    st.query_params.update({"user": rec.get("name"), "token": token})
+                except Exception:
+                    st.info("Hinweis: 'auto_token' Spalte nicht vorhanden – automatischer Login per URL-Token ist deaktiviert.")
+            st.success(f"Willkommen, {rec.get('name')}!")
+            st.rerun()
 
-# -------- Rebuild all ratings helper ----------
-def _rebuild_all():
-    """Rebuilds all ELO ratings after a confirmed match and saves players.csv."""
-    global players, matches, doubles, rounds
-    players = rebuild_players(players, matches)
-    players = rebuild_players_d(players, doubles)
-    players = rebuild_players_r(players, rounds)
-    save_csv(players, PLAYERS)
+    with tabs[1]:
+        r_name = st.text_input("Neuer Spielername", key="reg_name")
+        r_pin1 = st.text_input("PIN wählen (4-stellig)", type="password", key="reg_pin1")
+        r_pin2 = st.text_input("PIN bestätigen", type="password", key="reg_pin2")
+        if st.button("Registrieren"):
+            if not r_name or not r_pin1 or not r_pin2:
+                st.warning("Name und PIN eingeben.")
+                return
+            if r_pin1 != r_pin2:
+                st.warning("PINs stimmen nicht überein.")
+                return
+            # Kollisionen ignorieren Groß/Kleinschreibung und Leerzeichen
+            try:
+                rows = sp.table("players").select("id,name").execute().data or []
+            except Exception:
+                rows = []
+            if any(norm_name(row.get("name")) == norm_name(r_name) for row in rows):
+                st.warning("Spieler existiert bereits (Groß/Kleinschreibung/Leerzeichen ignoriert).")
+                return
+            payload = {
+                "name": r_name,
+                "pin": hash_pin(r_pin1),
+                # Stats-Defaults, falls Spalten existieren
+                "elo": 1200, "siege": 0, "niederlagen": 0, "spiele": 0,
+                "d_elo": 1200, "d_siege": 0, "d_niederlagen": 0, "d_spiele": 0,
+                "r_elo": 1200, "r_siege": 0, "r_zweite": 0, "r_niederlagen": 0, "r_spiele": 0,
+                "g_elo": 1200,
+            }
+            try:
+                sp.table("players").insert(payload).execute()
+                clear_table_cache()
+                st.success("Registriert! Bitte einloggen.")
+            except Exception as e:
+                st.error(f"Konnte nicht registrieren: {e}")
+# endregion
+
+# region layout_header
+st.header("🏓 AK-Tischtennis")
+st.markdown(
+    """
+    <style>
+      /* Make all Streamlit tab bars span full width and distribute tabs evenly */
+      div.stTabs > div[role="tablist"],
+      div.stTabs [data-baseweb="tab-list"] {
+        display: flex !important;
+        width: 100% !important;
+      }
+      div.stTabs > div[role="tablist"] > div[role="tab"],
+      div.stTabs [data-baseweb="tab-list"] [data-baseweb="tab"] {
+        flex: 1 1 0 !important;
+        justify-content: center !important;
+        text-align: center !important;
+      }
+      /* Optional: reduce default gaps for tighter fit on mobile */
+      div.stTabs [data-baseweb="tab-list"] { gap: 0 !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+# endregion
+
+# region session_init
+# Session-Defaults setzen und Auto-Login via URL prüfen
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
-if "current_player" not in st.session_state:
-    st.session_state.current_player = None
-# -------- Auto‑Login per URL ?user=&token= ----------
-if not st.session_state.logged_in:
-    q = st.query_params
-    if "user" in q and "token" in q:
-        auto_user  = q["user"][0]
-        auto_token = q["token"][0]
-        if auto_user in players["Name"].values:
-            stored_pin = players.loc[players["Name"] == auto_user, "Pin"].iat[0]
-            if stored_pin == auto_token:
-                st.session_state.logged_in = True
-                st.session_state.current_player = auto_user
-# View mode: "spiel" (default) or "regeln"
-if "view_mode" not in st.session_state:
-    st.session_state.view_mode = "home"
+    st.session_state.player_id = None
+    st.session_state.player_name = None
 
-# Remove sidebar wrapper and dedent login/registration UI to main area
-if not st.session_state.logged_in:
-    st.header("Login / Registrieren")
-    default_mode = "Registrieren" if players.empty else "Login"
-    mode = st.radio("Aktion wählen", ("Login", "Registrieren"),
-                    index=0 if default_mode == "Login" else 1)
-
-    if mode == "Login":
-        if players.empty:
-            st.info("Noch keine Spieler angelegt.")
-        else:
-            # Manuelle Eingabe des Spielernamens statt Auswahl
-            login_name = st.text_input("Spielername")
-            login_pin = st.text_input("PIN", type="password")
-            if st.button("Einloggen"):
-                if login_name not in players["Name"].values:
-                    st.error("Spielername nicht gefunden.")
-                else:
-                    stored_pin = players.loc[players["Name"] == login_name, "Pin"].iat[0]
-                    if check_pin(login_pin, stored_pin):
-                        # Falls PIN noch im Klartext war: sofort hash speichern
-                        if not stored_pin.startswith("$2b$") and not stored_pin.startswith("$2a$"):
-                            players.loc[players["Name"] == login_name, "Pin"] = hash_pin(login_pin)
-                            save_csv(players, PLAYERS)
-                        st.session_state.logged_in = True
-                        st.session_state.current_player = login_name
-                        # Save login in URL so refresh preserves session
-                        st.query_params.update({
-                            "user": login_name,
-                            "token": players.loc[players["Name"] == login_name, "Pin"].iat[0],
-                        })
-                        st.rerun()
-                    else:
-                        st.error("Falsche PIN")
-
-    elif mode == "Registrieren":
-        reg_name = st.text_input("Neuer Spielername")
-        reg_pin1 = st.text_input("PIN wählen (4-stellig)", type="password")
-        reg_pin2 = st.text_input("PIN bestätigen", type="password")
-        if st.button("Registrieren"):
-            if reg_name == "" or reg_pin1 == "":
-                st.warning("Name und PIN eingeben.")
-            elif reg_pin1 != reg_pin2:
-                st.warning("PINs stimmen nicht überein.")
-            elif reg_name in players["Name"].values:
-                st.warning("Spieler existiert bereits.")
-            else:
-                new_player = {
-                    "Name": reg_name,
-                    "ELO": 1200,
-                    "Siege": 0,
-                    "Niederlagen": 0,
-                    "Spiele": 0,
-                    "Pin": hash_pin(reg_pin1),
-
-                    # Doppel‑Defaults
-                    "D_ELO": 1200,
-                    "D_Siege": 0,
-                    "D_Niederlagen": 0,
-                    "D_Spiele": 0,
-
-                    # Rundlauf‑Defaults
-                    "R_ELO": 1200,
-                    "R_Siege": 0,
-                    "R_Zweite": 0,
-                    "R_Niederlagen": 0,
-                    "R_Spiele": 0,
-                }
-                players = pd.concat([players, pd.DataFrame([new_player])], ignore_index=True)
-                players = compute_gelo(players)  # Gesamt-ELO für neuen Spieler
-                save_csv(players, PLAYERS)
-                st.success(f"{reg_name} angelegt. Jetzt einloggen.")
-                st.rerun()
-# Eingeloggt: Sidebar zeigt Menü und Logout
-else:
-    with st.sidebar:
-        current_player = st.session_state.current_player  # lokal verfügbar
-        st.markdown(f"**Eingeloggt als:** {current_player}")
-        # Zurück zum Dashboard
-        if st.button("🏓 Home", use_container_width=True):
-            _open_modal("")                    # alle Modals schließen
-            st.session_state.view_mode = "home"
-            st.rerun()
-        
-        if st.button("🏆 Turniermodus", use_container_width=True):
-            st.session_state.view_mode = "turniermodus"
-            st.rerun()
-
-        if st.button("♻️ Aktualisieren", use_container_width=True):
-            # Cache leeren, damit neu aus Google‑Sheets geladen wird
-            if "dfs" in st.session_state:
-                st.session_state["dfs"].clear()
-            try:
-                _get_ws.cache_clear()   # Worksheet‑Cache leeren
-            except Exception:
-                pass
-            st.rerun()
-
-        if st.button("📜 Regeln", use_container_width=True):
-            st.session_state.view_mode = "regeln"
-            st.rerun()
-
-        if st.button("🚪 Logout", use_container_width=True):
-            st.session_state.logged_in = False
-            st.session_state.current_player = None
-            st.query_params.clear()  # clear
-            st.rerun()
-
-        # QR-Code für Match-Eintrag
-        with st.expander("📱 QR-Code"):
-            st.image(str(QR_FILE), width=180)
-            st.caption("Scanne, um zu spielen 🏓.")
-
-        # Account löschen (Selbstlöschung)
-        with st.expander("🗑️ Account löschen"):
-            st.warning("Dies löscht deinen Spieler‑Eintrag **dauerhaft** inklusive aller zugehörigen Spiele!")
-            confirm = st.checkbox("Ich bin mir absolut sicher.")
-            if st.button("Account unwiderruflich löschen") and confirm:
-                # Spieler aus players entfernen
-                players = players[players["Name"] != current_player]
-
-                # Helferfunktion: Zeilen entfernen, in denen Name auftaucht
-                def drop_rows(df: pd.DataFrame, cols: list[str]):
-                    if df.empty:
-                        return df
-                    mask = df[cols].astype(str).eq(current_player).any(axis=1)
-                    return df[~mask]
-
-                # Einzel
-                matches   = drop_rows(matches,   ["A", "B"])
-                pending   = drop_rows(pending,   ["A", "B"])
-
-                # Doppel
-                doubles    = drop_rows(doubles,    ["A1","A2","B1","B2"])
-                pending_d  = drop_rows(pending_d,  ["A1","A2","B1","B2"])
-
-                # Rundlauf
-                if not rounds.empty:
-                    rounds = rounds[~rounds["Teilnehmer"].str.contains(current_player)]
-                if not pending_r.empty:
-                    pending_r = pending_r[~pending_r["Teilnehmer"].str.contains(current_player)]
-
-                # Elo neu berechnen
-                players = rebuild_players(players, matches)
-                players = rebuild_players_d(players, doubles)
-                players = rebuild_players_r(players, rounds)
-
-                # CSV speichern
-                save_csv(players,   PLAYERS)
-                save_csv(matches,   MATCHES)
-                save_csv(pending,   PENDING)
-                save_csv(doubles,   DOUBLES)
-                save_csv(pending_d, PENDING_D)
-                save_csv(rounds,    ROUNDS)
-                save_csv(pending_r, PENDING_R)
-
-                st.query_params.clear()  # clear URL params
-                st.success("Account und alle zugehörigen Daten wurden gelöscht.")
-                st.session_state.logged_in = False
-                st.session_state.current_player = None
-                st.rerun()
-
-        # Admin: vollständigen Rebuild auslösen
-        if current_player in ADMINS:
-            if st.button("🔄 Admin: Alle ELO neu berechnen", use_container_width=True):
-                _rebuild_all()
-                st.success("Alle Elo-Werte neu berechnet.")
-                st.rerun()
-
-
-if not st.session_state.logged_in:
-    st.stop()
-#
+# Versuch: Auto-Login direkt beim Start
+try_auto_login_from_query()
 # endregion
 
+# region ui_logged_in
 
-current_player = st.session_state.current_player
+def _metric_val(user: dict, key: str, default: int = 1200) -> int:
+    try:
+        return int(user.get(key, default))
+    except Exception:
+        return default
 
-# region Home Ansicht
-if st.session_state.view_mode == "home":
+def logged_in_header(user: dict):
+    name = user.get('name', 'Spieler')
+    gelo = _metric_val(user, 'g_elo')
+    elo = _metric_val(user, 'elo')
+    d_elo = _metric_val(user, 'd_elo')
+    r_elo = _metric_val(user, 'r_elo')
+
     st.markdown(
-        '<h1 style="text-align:center; margin-bottom:0.25rem;">🏓 Dashboard</h1>',
-        unsafe_allow_html=True
-    )
-    # Mobile: Metrics schmaler machen, damit sie in einer Zeile bleiben und Schriftgrößen anpassen
-    st.markdown(
-        """
+        f"""
         <style>
-        /* Flex metrics */
-        [data-testid="metric-container"] {
-            flex: none !important;
-            width: auto !important;
-            padding: 0.2rem !important;
-            text-align: center !important;
-            margin: 0 auto !important;
-        }
-        [data-testid="metric-container"] > div {
-            display: flex !important;
-            flex-direction: column !important;
-            align-items: center !important;
-            justify-content: center !important;
-        }
-        /* Label text */
-        [data-testid="metric-container"] > div:first-child p {
-            font-size: 0.8rem !important;
-        }
-        /* Value text */
-        [data-testid="metric-container"] > div:nth-child(2) p {
-            font-size: 5rem !important;
-            line-height: 1.1 !important;
-        }
-        /* Leaderboards: kleinere Schrift und kompaktere Zellen auf Mobil */
-        @media (max-width: 600px) {
-          .stDataFrame table th,
-          .stDataFrame table td {
-            font-size: 0.7rem !important;
-            padding: 0.2rem 0.3rem !important;
-          }
-        }
-        /* Spaltenzeilen: nicht umbrechen, horizontal scroll */
-        [data-testid="stColumns"] {
-            display: flex !important;
-            flex-wrap: nowrap !important;
-            overflow-x: auto !important;
-        }
-        [data-testid="stColumn"] {
-            min-width: 100px !important;
-        }
+        .elo-wrap {{ margin: 0.25rem 0 0.5rem; }}
+        .welcome {{ font-size: 1.25rem; font-weight: 600; margin: 0 0 .25rem; }}
+        .elo-center {{ text-align: center; margin: .25rem 0 .5rem; }}
+        .elo-center .value {{ font-size: 40px; font-weight: 700; line-height: 1; }}
+        .elo-grid {{ display: flex; gap: 8px; justify-content: center; align-items: stretch; flex-wrap: nowrap; }}
+        .elo-card {{ flex: 0 1 33%; max-width: 33%; padding: 8px 10px; border: 1px solid rgba(255,255,255,.15); border-radius: 10px; text-align: center; backdrop-filter: blur(2px); }}
+        .elo-card .label {{ font-size: 12px; opacity: .75; margin-bottom: 2px; }}
+        .elo-card .value {{ font-size: 18px; font-weight: 600; line-height: 1.1; }}
+        @media (max-width: 480px) {{
+          .elo-center .value {{ font-size: 34px; }}
+          .elo-grid {{ gap: 6px; }}
+          .elo-card {{ padding: 6px 6px; }}
+          .elo-card .value {{ font-size: 16px; }}
+        }}
         </style>
+        <div class="elo-wrap">
+          <div class="welcome">Willkommen, {name}</div>
+          <div class="elo-center"><div class="value">{gelo}</div></div>
+          <div class="elo-grid">
+              <div class="elo-card"><div class="label">Einzel</div><div class="value">{elo}</div></div>
+              <div class="elo-card"><div class="label">Doppel</div><div class="value">{d_elo}</div></div>
+              <div class="elo-card"><div class="label">Rundlauf</div><div class="value">{r_elo}</div></div>
+          </div>
+        </div>
         """,
         unsafe_allow_html=True,
     )
-    user = players.loc[players.Name == current_player].iloc[0]
 
-    st.markdown(
-        f'<h3 style="text-align:center; margin-top:0;">Willkommen, <strong>{current_player}</strong>!</h3>',
-        unsafe_allow_html=True
-    )
 
-    # Top: Gesamt-ELO, zentriert
-    st.markdown(
-        f"""
-        <div style="text-align:center; margin:1rem 0;">
-          <div style="font-size:1.5rem; color:var(--text-secondary);">ELO</div>
-          <div style="font-size:3rem; font-weight:bold; color:var(--text-primary);">{int(user.G_ELO)}</div>
-        </div>
-        """, unsafe_allow_html=True
-    )
+def render_round_vs_card(r: pd.Series, id_to_name: dict, *, highlight_name: str = "", key: str = "", on_reject=None, button_label: str = "❌ Ablehnen"):
+    """Rendert eine Rundlauf-Karte als Expander – **nur** mit Titel + Ablehnen-Button."""
+    teiln_ids = [pid for pid in str(r.get("teilnehmer") or "").split(";") if pid]
+    teiln = [id_to_name.get(pid, pid) for pid in teiln_ids]
+    fin_list = [pid for pid in str(r.get("finalisten") or "").split(";") if pid]
+    winner_id = str(r.get("sieger")) if r.get("sieger") else None
+    winner_n = id_to_name.get(winner_id, winner_id) or "-"
+    second_id = fin_list[1] if len(fin_list) > 1 and fin_list[0] == winner_id else (fin_list[0] if len(fin_list) > 0 else None)
+    second_n = id_to_name.get(second_id, second_id) if second_id else "-"
 
-    cols = st.columns(3)
-    with cols[0]:
-        st.markdown(
-            f"""
-            <div style="text-align:center;">
-              <div style="font-size:1.5rem; color:var(--text-secondary);">Einzel</div>
-              <div style="font-size:2.2rem; font-weight:bold; color:var(--text-primary);">{int(user.ELO)}</div>
-            </div>
-            """, unsafe_allow_html=True
-        )
-    with cols[1]:
-        st.markdown(
-            f"""
-            <div style="text-align:center;">
-            <div style="font-size:1.5rem; color:var(--text-secondary);">Doppel</div>
-            <div style="font-size:2.2rem; font-weight:bold; color:var(--text-primary);">{int(user.D_ELO)}</div>
-            </div>
-        """, unsafe_allow_html=True
-        )
-    with cols[2]:
-        st.markdown(
-            f"""
-            <div style="text-align:center;">
-              <div style="font-size:1.5rem; color:var(--text-secondary);">Rundlauf</div>
-              <div style="font-size:2.2rem; font-weight:bold; color:var(--text-primary);">{int(user.R_ELO)}</div>
-            </div>
-            """, unsafe_allow_html=True
-        )
-    # DataFrame mit Spielern, die mindestens ein Spiel haben
-    active = players[
-        (players.Spiele > 0)
-        | (players.D_Spiele > 0)
-        | (players.R_Spiele > 0)
-    ]
-    # Gesamt-Leaderboard als volle Breite HTML-Tabelle
-    df_total = active.loc[:, ["Name", "G_ELO"]] \
-        .rename(columns={"G_ELO": "ELO"}) \
-        .sort_values("ELO", ascending=False)
-    # Highlight current player in Gesamt-Leaderboard
-    def highlight_current(row):
-        # Highlight the current player row with light blue background and black text
-        return [
-            'background-color: #ADD8E6; color: black'
-            if row['Name'] == current_player else ''
-            for _ in row
-        ]
-    styler_total = (
-        df_total.style
-        .apply(highlight_current, axis=1)
-        .format({"ELO": "{:.0f}"})
-        .set_table_attributes('class="total-table"')
-    )
-    html_total = (
-        styler_total
-        .to_html(border=0)
-    )
-    st.subheader("Gesamt Leaderboard")
-    st.markdown(
-        f"<div class='total-table-container'>{html_total}</div>",
-        unsafe_allow_html=True
-    )
+    # Expander-Titel (ohne Modus, Medaillen vor den Namen)
+    title = f"{', '.join(teiln)} – 🥇 {winner_n}, 🥈 {second_n}"
+    exp = st.expander(title, expanded=False)
 
-    # Drei Modus-Leaderboards als HTML-Tabellen nebeneinander mit Highlight
-    def make_styled(df, elo_col):
-        # Select only Name and the specific elo column, then rename to ELO
-        df2 = df[["Name", elo_col]].copy()
-        df2.columns = ["Name", "ELO"]
-        df2 = df2.sort_values("ELO", ascending=False)
-        # Apply highlight to current player row
-        styler = (
-            df2.style
-            .apply(highlight_current, axis=1)
-            .format({"ELO": "{:.0f}"})
-            .set_table_attributes('class="mini-table"')
-        )
-        return styler.to_html(border=0)
-    html_single = make_styled(players[players.Spiele > 0], "ELO")
-    html_double = make_styled(players[players.D_Spiele > 0], "D_ELO")
-    html_round  = make_styled(players[players.R_Spiele > 0], "R_ELO")
+    with exp:
+        if st.button(button_label, key=key):
+            if on_reject:
+                on_reject(r["id"])  # erwartet Tabellen-ID
 
-    st.markdown(
-    """
-    <div style="display:flex; width:100%; gap:1rem;">
-      <div style="flex:1; text-align:center; margin:1rem; font-size: 1.1rem;"><strong>Einzel</strong></div>
-      <div style="flex:1; text-align:center; margin:1rem; font-size: 1.1rem;"><strong>Doppel</strong></div>
-      <div style="flex:1; text-align:center; margin:1rem; font-size: 1.1rem;"><strong>Rundlauf</strong></div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-    )
-    
-    html = f"""
-    <div style="display:flex; width:100%; gap:1rem;">
-      <div style="flex:1 1 auto; min-width:0; text-align:center;">
-        <div class="mini-table-container">{html_single}</div>
-      </div>
-      <div style="flex:1 1 auto; min-width:0; text-align:center;">
-        <div class="mini-table-container">{html_double}</div>
-      </div>
-      <div style="flex:1 1 auto; min-width:0; text-align:center;">
-        <div class="mini-table-container">{html_round}</div>
-      </div>
-    </div>
-    <style>
-    /* Reset table margins and spacing so container borders align */
-    .total-table, .mini-table {{
-        border-collapse: collapse !important;
-        border-spacing: 0 !important;
-        margin: 0 !important;
-    }}
-    /* Remove all cell borders by default */
-    .total-table th, .total-table td,
-    .mini-table th, .mini-table td {{
-        border: none !important;
-    }}
-    /* Vertical internal lines between columns */
-    .total-table th + th,
-    .total-table td + td,
-    .mini-table th + th,
-    .mini-table td + td {{
-        border-left: 1px solid rgba(145,145,145,0.3) !important;
-    }}
-    /* Horizontal internal lines between rows */
-    .total-table tr + tr th,
-    .total-table tr + tr td,
-    .mini-table tr + tr th,
-    .mini-table tr + tr td {{
-        border-top: 1px solid rgba(130,130,130,0.3) !important;
-    }}
-    /* Header row styling: background fill and no underline */
-    .total-table-container .total-table th,
-    .mini-table-container .mini-table th {{
-        background-color: rgba(145,145,145,0.2) !important;
-    }}
-    /* Remove all header cell borders */
-    .total-table-container .total-table th,
-    .mini-table-container .mini-table th {{
-        border: none !important;
-    }}
-    /* Remove any internal column line from header */
-    .total-table-container .total-table th + th,
-    .mini-table-container .mini-table th + th {{
-        border-left: none !important;
-    }}
-    /* Remove the first data row’s top border (beneath header) */
-    .total-table tr:nth-child(2) th,
-    .total-table tr:nth-child(2) td,
-    .mini-table tr:nth-child(2) th,
-    .mini-table tr:nth-child(2) td {{
-        border-top: none !important;
-    }}
-    /* Rounded corners and subtle border for all tables */
-    .total-table-container,
-    .mini-table-container {{
-        border-radius: 8px !important;
-        overflow: hidden !important;
-        border: 1px solid rgba(130,130,130,0.2) !important;
-    }}
-    .total-table-container .total-table {{
-        width: 100% !important;
-        table-layout: auto !important;
-    }}
-    /* Hide index column */
-    .total-table-container .total-table th:first-child,
-    .total-table-container .total-table td:first-child {{
-        display: none !important;
-    }}
-    /* Make mini-tables fill their flex column equally */
-    .mini-table {{
-        width: 100% !important;
-        table-layout: fixed !important;
-    }}
-    .mini-table th, .mini-table td {{
-        font-size: 0.8rem !important;
-        padding: 0.2rem !important;
-        white-space: nowrap !important;
-        overflow: hidden !important;
-        text-overflow: ellipsis !important;
-    }}
 
-    /* Hide index for mini tables */
-    .mini-table th:first-child,
-    .mini-table td:first-child {{
-        display: none !important;
-    }}
-    </style>
-    """
-    st.markdown(html, unsafe_allow_html=True)
+# --- Helper: Einzel-Karte im VS-Layout (mit Sieger-Medaille) ---
+def render_single_vs_card(r: pd.Series, id_to_name: dict, *, highlight_name: str = "", key: str = "", on_reject=None, button_label: str = "❌ Ablehnen"):
+    a_n = id_to_name.get(str(r["a"]), r["a"]) ; b_n = id_to_name.get(str(r["b"]), r["b"])
+    pa, pb = int(r.get("punktea", 0)), int(r.get("punkteb", 0))
+    left_medal = "🥇 " if pa > pb else ""
+    right_medal = "🥇 " if pb > pa else ""
+    title = f"{left_medal}{a_n} - {pa}:{pb} - {right_medal}{b_n}"
+    exp = st.expander(title, expanded=False)
+    with exp:
+        if st.button(button_label, key=key):
+            if on_reject:
+                on_reject(r["id"])  # erwartet Tabellen-ID
 
-    st.divider()
-    # --- Pending Confirmation Counts ------------------------------
-    # Einzel
-    sp = pending[
-        (
-            (pending["A"] == current_player) & (~pending["confA"])
-        ) | (
-            (pending["B"] == current_player) & (~pending["confB"])
-        )
-    ]
-    # Doppel
-    dp = pending_d[
-        (
-            (pending_d["A1"] == current_player) | (pending_d["A2"] == current_player)
-        ) & (~pending_d["confA"])
-        |
-        (
-            (pending_d["B1"] == current_player) | (pending_d["B2"] == current_player)
-        ) & (~pending_d["confB"])
-    ]
-    # Rundlauf
-    rp = pending_r[
-        pending_r["Teilnehmer"].str.contains(current_player, na=False)
-    ].copy()
-    rp["confirmed"] = rp["confirmed_by"].fillna("").apply(lambda s: current_player in s.split(";"))
-    rp = rp[~rp["confirmed"]]
-    total_pending = len(sp) + len(dp) + len(rp)
 
-    bcols = st.columns(4)
-    if bcols[0].button("➕ Einzel", use_container_width=True):
-        _open_modal("show_single_modal"); st.rerun()
-    if bcols[1].button("➕ Doppel", use_container_width=True):
-        _open_modal("show_double_modal"); st.rerun()
-    if bcols[2].button("➕ Rundlauf", use_container_width=True):
-        _open_modal("show_round_modal"); st.rerun()
-    confirm_label = f"✅ Offene bestätigen ({total_pending})" if total_pending > 0 else "✅ Offene bestätigen"
-    if bcols[3].button(confirm_label, use_container_width=True):
-        _open_modal("show_confirm_modal"); st.rerun()
+# --- Helper: Doppel-Karte im VS-Layout (mit Sieger-Medaille) ---
+def render_double_vs_card(r: pd.Series, id_to_name: dict, *, highlight_name: str = "", key: str = "", on_reject=None, button_label: str = "❌ Ablehnen"):
+    a1 = id_to_name.get(str(r["a1"]), r["a1"]) ; a2 = id_to_name.get(str(r["a2"]), r["a2"]) 
+    b1 = id_to_name.get(str(r["b1"]), r["b1"]) ; b2 = id_to_name.get(str(r["b2"]), r["b2"]) 
+    pa, pb = int(r.get("punktea", 0)), int(r.get("punkteb", 0))
+    team_a = f"{a1}/{a2}"
+    team_b = f"{b1}/{b2}"
+    left_medal = "🥇 " if pa > pb else ""
+    right_medal = "🥇 " if pb > pa else ""
+    title = f"{left_medal}{team_a} - {pa}:{pb} - {right_medal}{team_b}"
+    exp = st.expander(title, expanded=False)
+    with exp:
+        if st.button(button_label, key=key):
+            if on_reject:
+                on_reject(r["id"])  # erwartet Tabellen-ID
 
-    # --- Modale Eingabe-Dialoge (Einzel/Doppel/Rundlauf) -----------------
-    if st.session_state.show_single_modal:
-        with ui_container("Einzelmatch eintragen"):
-            st.write(f"Spieler wählen")
-                        # Spieler A und B auswählen
-            default_idx = players["Name"].tolist().index(current_player)
-            a = st.selectbox("Spieler A wählen", players["Name"], index=default_idx)
-            b = st.selectbox("Spieler B wählen", players[players.Name != a]["Name"], placeholder="Spieler wählen")
-            # Punkte eingeben
-            pa = st.number_input(f"Punkte {a}", min_value=0, max_value=21, value=11, key="m_pa")
-            pb = st.number_input(f"Punkte {b}", min_value=0, max_value=21, value=11, key="m_pb")
 
-            col_ok, col_cancel = st.columns(2)
-                        # Speichern: initiale Bestätigung für den Creator, volle Bestätigung später
-            if col_ok.button("Speichern", key="single_save", disabled=(a is None or b is None or a == b)):
-                now = datetime.now(ZoneInfo("Europe/Berlin"))
-                # Creator hat automatisch bestätigt, der andere muss später im Confirm-Modal zustimmen
-                confA = (a == current_player)
-                confB = (b == current_player)
-                pending.loc[len(pending)] = [now, a, b, pa, pb, confA, confB]
-                save_csv(pending, PENDING)
-                st.success("Match gespeichert – benötigt Bestätigung beider Spieler.")
+def get_current_user() -> dict | None:
+    try:
+        pid = st.session_state.get("player_id")
+        if not pid:
+            return None
+        rec = sp.table("players").select("*").eq("id", pid).single().execute().data
+        return rec
+    except Exception:
+        return None
+
+
+def logged_in_ui():
+    user = get_current_user()
+    if not user:
+        st.error("Nutzer nicht gefunden – bitte erneut einloggen.")
+        for k in ("logged_in","player_id","player_name"):
+            st.session_state.pop(k, None)
+        st.rerun()
+        return
+
+    # Tabs: Übersicht (zuerst), Spielen, Account (Logout)
+    tabs = st.tabs(["Übersicht", "Spielen", "Account"])  
+
+    # region Übersicht
+    with tabs[0]:
+        logged_in_header(user)
+
+        # --- Offene Bestätigungen (auch in Übersicht anzeigen) ---
+        id_to_name, name_to_id = get_player_maps()
+        me = st.session_state.get("player_id")
+
+        st.divider()
+
+        col_head, col_btn = st.columns([100,1])
+        with col_head:
+            st.markdown("### Offene Bestätigungen")
+        with col_btn:
+            if st.button("🔄", key="btn_refresh_confirmations_ovw"):
+                clear_table_cache()
                 st.rerun()
-                
-            if col_cancel.button("Abbrechen", key="single_cancel"):
-                _open_modal("")
-                st.rerun()
+        
+        pm = load_table("pending_matches")
+        pdbl = load_table("pending_doubles")
+        pr = load_table("pending_rounds")
 
-    if st.session_state.show_double_modal:
-        with ui_container("Doppelmatch eintragen"):
-            st.write("Spieler auswählen")
-            a1 = st.selectbox("A1", players.Name, index=None, placeholder="Spieler wählen", key="md_a1")
-            a2 = st.selectbox("A2", players[players.Name != a1].Name, index=None, placeholder="Spieler wählen", key="md_a2")
-            b1 = st.selectbox("B1", players[~players.Name.isin([a1,a2])].Name, index=None, placeholder="Spieler wählen", key="md_b1")
-            b2 = st.selectbox("B2", players[~players.Name.isin([a1,a2,b1])].Name, index=None, placeholder="Spieler wählen", key="md_b2")
-            pA = st.number_input("Punkte Team A", 0, 21, 11, key="md_pA")
-            pB = st.number_input("Punkte Team B", 0, 21, 8,  key="md_pB")
-
-            disabled = any(x is None for x in (a1,a2,b1,b2))
-            c_ok, c_cancel = st.columns(2)
-            if c_ok.button("Speichern", key="double_save", disabled=disabled):
-                pending_d.loc[len(pending_d)] = [
-                    datetime.now(ZoneInfo("Europe/Berlin")), a1, a2, b1, b2, pA, pB, True, False
-                ]
-                save_csv(pending_d, PENDING_D)
-                st.success("Doppel gespeichert – wartet auf Bestätigung.")
-                st.rerun()
-            if c_cancel.button("Abbrechen", key="double_cancel"):
-                _open_modal(""); st.rerun()
-
-    if st.session_state.show_round_modal:
-        with ui_container("Rundlauf eintragen"):
-            teilnehmer = st.multiselect("Teilnehmer (min. 3)", players.Name, key="mr_teil")
-            if len(teilnehmer) >= 3:
-                fin_cols = st.columns(2)
-                fin1 = fin_cols[0].selectbox("Finalist 1", teilnehmer, index=None, placeholder="Spieler wählen", key="mr_f1")
-                fin2_opts = [p for p in teilnehmer if p != fin1]
-                fin2 = fin_cols[1].selectbox("Finalist 2", fin2_opts, index=None, placeholder="Spieler wählen", key="mr_f2")
-                sieger_opts = [p for p in (fin1, fin2) if p]
-                sieger = st.selectbox("Sieger", sieger_opts, index=None, placeholder="Sieger wählen", key="mr_win")
+        # --- Meine offenen Bestätigungen sammeln (pro Modus) ---
+        info_rows_s, info_rows_d, info_rows_r = [], [], []
+        # Einzel
+        if not pm.empty:
+            has_c = table_has_creator("pending_matches")
+            if has_c:
+                my_conf_s = pm[(pm["a"].astype(str).eq(str(me)) | pm["b"].astype(str).eq(str(me))) & (pm["creator"].astype(str) != str(me))]
             else:
-                fin1 = fin2 = sieger = None
+                my_conf_s = pm[pm["b"].astype(str) == str(me)]
+            for _, r in my_conf_s.iterrows():
+                info_rows_s.append(r)
+        # Doppel
+        if not pdbl.empty:
+            has_c_d = table_has_creator("pending_doubles")
+            if has_c_d:
+                part_mask = (pdbl[["a1","a2","b1","b2"]].astype(str) == str(me)).any(axis=1)
+                my_conf_d = pdbl[part_mask & (pdbl["creator"].astype(str) != str(me))]
+            else:
+                my_conf_d = pdbl[(pdbl["a1"].astype(str) != str(me)) & ((pdbl["a2"].astype(str) == str(me)) | (pdbl["b1"].astype(str) == str(me)) | (pdbl["b2"].astype(str) == str(me)))]
+            for _, r in my_conf_d.iterrows():
+                info_rows_d.append(r)
+        # Rundlauf
+        if not pr.empty:
+            has_c_r = table_has_creator("pending_rounds")
+            if has_c_r:
+                def _involved_not_creator(row):
+                    teiln = [x for x in str(row.get("teilnehmer","")) .split(";") if x]
+                    return (str(me) in teiln) and (str(row.get("creator")) != str(me))
+                my_conf_r = pr[pr.apply(_involved_not_creator, axis=1)]
+            else:
+                def _is_involved_not_creator(row):
+                    teiln = [x for x in str(row.get("teilnehmer","")) .split(";") if x]
+                    return (str(me) in teiln) and (len(teiln) > 0 and teiln[0] != str(me))
+                my_conf_r = pr[pr.apply(_is_involved_not_creator, axis=1)]
+            for _, r in my_conf_r.iterrows():
+                info_rows_r.append(r)
 
-            r_ok, r_cancel = st.columns(2)
-            if r_ok.button("Speichern", key="round_save", disabled=(sieger is None)):
-                pending_r.loc[len(pending_r)] = {
-                    "Datum": datetime.now(ZoneInfo("Europe/Berlin")),
-                    "Teilnehmer": ";".join(teilnehmer),
-                    "Finalist1": fin1,
-                    "Finalist2": fin2,
-                    "Sieger": sieger,
-                    "creator": current_player,
-                    "confirmed_by": current_player,
-                }
-                save_csv(pending_r, PENDING_R)
-                st.success("Rundlauf gespeichert – wartet auf Bestätigung.")
+        # --- Global: Alle bestätigen (unter dem Refresh-Button) ---
+        if any([info_rows_s, info_rows_d, info_rows_r]):
+            if st.button("✅ Alle bestätigen", key="btn_accept_all_pending_ovw", type="primary"):
+                try:
+                    # Einzel
+                    for r in info_rows_s:
+                        confirm_pending_single(r)
+                    # Doppel
+                    for r in info_rows_d:
+                        confirm_pending_double(r)
+                    # Rundlauf
+                    for r in info_rows_r:
+                        confirm_pending_round(r)
+                    clear_table_cache()
+                    st.success("Alle bestätigbaren Spiele bestätigt.")
+                    st.rerun()
+                except Exception:
+                    clear_table_cache()
+                    st.warning("Massenbestätigung teilweise fehlgeschlagen. Seite neu laden und prüfen.")
+        else:
+            st.info("Keine offenen Bestätigungen.")
+
+        # --- Karten-Ansicht der einzelnen Spiele (nur Ablehnen pro Karte) ---
+        # Einzel-Karten
+        me_name = user.get("name")
+        for r in info_rows_s:
+            render_single_vs_card(
+                r, id_to_name,
+                highlight_name=me_name,
+                key=f"trej_s_{r['id']}_ovw",
+                on_reject=lambda rid: (reject_pending("pending_matches", rid), clear_table_cache(), st.rerun()),
+                button_label="❌ Ablehnen",
+            )
+
+        # Doppel-Karten
+        me_name = user.get("name")
+        for r in info_rows_d:
+            render_double_vs_card(
+                r, id_to_name,
+                highlight_name=me_name,
+                key=f"trej_d_{r['id']}_ovw",
+                on_reject=lambda rid: (reject_pending("pending_doubles", rid), clear_table_cache(), st.rerun()),
+                button_label="❌ Ablehnen",
+            )
+
+        # Rundlauf-Karten
+        me_name = user.get("name")
+        for r in info_rows_r:
+            render_round_vs_card(
+                r, id_to_name,
+                highlight_name=me_name,
+                key=f"trej_r_{r['id']}_ovw",
+                on_reject=lambda rid: (reject_pending("pending_rounds", rid), clear_table_cache(), st.rerun()),
+                button_label="❌ Ablehnen",
+            )
+
+        # --- Leaderboards & Letzte Spiele ---
+        st.divider()
+        st.markdown("### Leaderboards & Letzte Spiele")
+
+        lb_tabs = st.tabs(["Gesamt", "Einzel", "Doppel", "Rundlauf", "Letzte Spiele"])
+
+        # --- Helper: safe sorting and display of leaderboard ---
+        def _show_lb(df_players: pd.DataFrame, col: str, title: str, highlight_name: str):
+            if df_players.empty or col not in df_players.columns:
+                st.info("Noch keine Daten.")
+                return
+            tmp = df_players[["name", col]].copy()
+            tmp[col] = pd.to_numeric(tmp[col], errors="coerce").fillna(0).astype(int)
+            tmp = tmp.sort_values(col, ascending=False).reset_index(drop=True)
+            tmp = tmp.rename(columns={"name": "Name", col: title})
+
+            # Index praktisch unsichtbar machen: minimale Breite via Styler und transparente Farbe
+            primary = st.get_option("theme.primaryColor") or "#dc2626"
+
+            def _style_row(row: pd.Series):
+                if str(row["Name"]) == str(highlight_name):
+                    return [f"color: {primary}; font-weight: 700" for _ in row.index]
+                return ["" for _ in row.index]
+
+            sty = tmp.style.apply(_style_row, axis=1)
+            # Erzwinge Zentrierung explizit pro Spalte (wirkt zuverlässiger als global)
+            for _c in ["Name", title]:
+                try:
+                    sty = sty.set_properties(subset=[_c], **{"text-align": "center"})
+                except Exception:
+                    pass
+            sty = sty.set_table_styles([
+                {"selector": "th.row_heading", "props": [
+                    ("width","1px"),("min-width","1px"),("max-width","1px"),
+                    ("padding","0"),("border","none"),("overflow","hidden"),
+                    ("color","transparent")
+                ]},
+                {"selector": "tbody th", "props": [
+                    ("width","1px"),("min-width","1px"),("max-width","1px"),
+                    ("padding","0"),("border","none"),("overflow","hidden"),
+                    ("color","transparent")
+                ]},
+                {"selector": "th.blank", "props": [
+                    ("width","1px"),("min-width","1px"),("max-width","1px"),
+                    ("padding","0"),("border","none"),("overflow","hidden"),
+                    ("color","transparent")
+                ]},
+                {"selector": "thead th", "props": [
+                    ("text-align","center !important")
+                ]},
+                {"selector": "th.col_heading", "props": [
+                    ("white-space","nowrap"), ("text-align","center !important")
+                ]},
+                {"selector": "tbody td", "props": [
+                    ("text-align","center !important")
+                ]},
+            ], overwrite=False)
+            st.table(sty)
+
+        players_df = load_table("players")
+
+        me_name = user.get("name")
+
+        with lb_tabs[0]:  # Gesamt‑ELO
+            _show_lb(players_df, "g_elo", "Gesamt‑ELO", me_name)
+        with lb_tabs[1]:  # Einzel‑ELO
+            _show_lb(players_df, "elo", "Einzel‑ELO", me_name)
+        with lb_tabs[2]:  # Doppel‑ELO
+            _show_lb(players_df, "d_elo", "Doppel‑ELO", me_name)
+        with lb_tabs[3]:  # Rundlauf‑ELO
+            _show_lb(players_df, "r_elo", "Rundlauf‑ELO", me_name)
+
+        with lb_tabs[4]:  # Letzte Spiele
+            m = load_table("matches")
+            d = load_table("doubles")
+            r = load_table("rounds")
+            rows = []
+            # Einzel
+            if not m.empty:
+                for _, x in m.iterrows():
+                    a_n = id_to_name.get(str(x.get("a")), str(x.get("a")))
+                    b_n = id_to_name.get(str(x.get("b")), str(x.get("b")))
+                    rows.append({
+                        "datum": x.get("datum"),
+                        "Modus": "Einzel",
+                        "Teilnehmer": f"{a_n} vs {b_n}",
+                        "Ergebnis": f"{int(x.get('punktea',0))}:{int(x.get('punkteb',0))}",
+                    })
+            # Doppel
+            if not d.empty:
+                for _, x in d.iterrows():
+                    a1 = id_to_name.get(str(x.get("a1")), str(x.get("a1")))
+                    a2 = id_to_name.get(str(x.get("a2")), str(x.get("a2")))
+                    b1 = id_to_name.get(str(x.get("b1")), str(x.get("b1")))
+                    b2 = id_to_name.get(str(x.get("b2")), str(x.get("b2")))
+                    rows.append({
+                        "datum": x.get("datum"),
+                        "Modus": "Doppel",
+                        "Teilnehmer": f"{a1}/{a2} vs {b1}/{b2}",
+                        "Ergebnis": f"{int(x.get('punktea',0))}:{int(x.get('punkteb',0))}",
+                    })
+            # Rundlauf
+            if not r.empty:
+                for _, x in r.iterrows():
+                    teiln = [id_to_name.get(pid, pid) for pid in str(x.get("teilnehmer") or "").split(";") if pid]
+                    fin_list = [id_to_name.get(pid, pid) for pid in str(x.get("finalisten") or "").split(";") if pid]
+                    winner_n = id_to_name.get(str(x.get("sieger")), str(x.get("sieger")))
+                    second_n = fin_list[1] if len(fin_list)>1 and fin_list[0]==winner_n else (fin_list[0] if len(fin_list)>0 else '-')
+                    rows.append({
+                        "datum": x.get("datum"),
+                        "Modus": "Rundlauf",
+                        "Teilnehmer": ", ".join(teiln),
+                        "Ergebnis": f"1.: {winner_n}\n2.: {second_n}",
+                    })
+            if rows:
+                df_last = pd.DataFrame(rows)
+                df_last["datum"] = pd.to_datetime(df_last["datum"], errors="coerce")
+                df_last = df_last.sort_values("datum", ascending=False, na_position="last").head(5)
+                show_df = df_last [["Modus","Teilnehmer","Ergebnis"]].copy()
+                primary = st.get_option("theme.primaryColor") or "#dc2626"
+
+                def _style_last(row: pd.Series):
+                    if me_name and str(me_name) in str(row["Teilnehmer"]):
+                        return [f"color: {primary}; font-weight: 700" for _ in row.index]
+                    return ["" for _ in row.index]
+
+                # Index unsichtbar machen: minimale Breite und transparente Farbe
+                sty = show_df.style.apply(_style_last, axis=1)
+                # Modus: nicht umbrechen; Ergebnis: Zeilenumbrüche via "\n" darstellen
+                try:
+                    sty = sty.set_properties(subset=["Modus"], **{"white-space": "nowrap"})
+                    sty = sty.set_properties(subset=["Ergebnis"], **{"white-space": "pre-line"})
+                except Exception:
+                    pass
+                sty = sty.set_table_styles([
+                    {"selector": "th.row_heading", "props": [
+                        ("width","1px"),("min-width","1px"),("max-width","1px"),
+                        ("padding","0"),("border","none"),("overflow","hidden"),
+                        ("color","transparent")
+                    ]},
+                    {"selector": "tbody th", "props": [
+                        ("width","1px"),("min-width","1px"),("max-width","1px"),
+                        ("padding","0"),("border","none"),("overflow","hidden"),
+                        ("color","transparent")
+                    ]},
+                    {"selector": "th.blank", "props": [
+                        ("width","1px"),("min-width","1px"),("max-width","1px"),
+                        ("padding","0"),("border","none"),("overflow","hidden"),
+                        ("color","transparent")
+                    ]},
+                    {"selector": "th.col_heading", "props": [
+                        ("white-space","nowrap"), ("text-align","left")
+                    ]},
+                ], overwrite=False)
+                st.table(sty)
+            else:
+                st.info("Noch keine Spiele vorhanden.")
+    # Spielen – neue UI für Spiele erstellen und verwalten
+    with tabs[1]:
+        st.subheader("Spielen")
+        id_to_name, name_to_id = get_player_maps()
+        me = st.session_state.get("player_id")
+
+        # --- Erstellung: Modus per Tabs ---
+        m_tabs = st.tabs(["Einzel", "Doppel", "Rundlauf"]) 
+
+        # Einzel
+        with m_tabs[0]:
+            play_myself = st.checkbox("Ich spiele mit", value=True, help="Dein Name als Teilnehmer A. Deaktiviere, um ein Match für andere anzulegen.")
+            if play_myself:
+                opponent = st.selectbox("Gegner", [n for n in name_to_id.keys() if name_to_id[n] != me], key="einzel_opponent")
+                c1, c2 = st.columns(2)
+                s_a = c1.number_input("Deine Punkte", min_value=0, step=1, value=11, key="einzel_s_a")
+                s_b = c2.number_input("Gegner Punkte", min_value=0, step=1, value=9, key="einzel_s_b")
+                if st.button("✅", key="btn_send_single_me"):
+                    create_pending_single(me, name_to_id[opponent], s_a, s_b)
+                    clear_table_cache()
+                    st.success("Einzel erstellt. Ein Teilnehmer muss bestätigen.")
+                    st.rerun()
+            else:
+                a_player = st.selectbox("Spieler A", [n for n in name_to_id.keys()], key="einzel_a")
+                b_player = st.selectbox("Spieler B", [n for n in name_to_id.keys() if n != a_player], key="einzel_b")
+                c1, c2 = st.columns(2)
+                s_a = c1.number_input("Punkte A", min_value=0, step=1, value=11, key="einzel2_s_a")
+                s_b = c2.number_input("Punkte B", min_value=0, step=1, value=9, key="einzel2_s_b")
+                if st.button("✅", key="btn_send_single_others"):
+                    create_pending_single(me, name_to_id[b_player], s_a, s_b, a_id=name_to_id[a_player])
+                    clear_table_cache()
+                    st.success("Einzel erstellt. Ein Teilnehmer muss bestätigen.")
+                    st.rerun()
+
+        # Doppel
+        with m_tabs[1]:
+            play_myself_d = st.checkbox("Ich spiele mit", value=True, key="doppel_play_myself")
+            if play_myself_d:
+                partner = st.selectbox("Partner", [n for n in name_to_id.keys() if name_to_id[n] != me], key="d_partner")
+                right1 = st.selectbox("Gegner 1", [n for n in name_to_id.keys() if name_to_id[n] not in (me, name_to_id[partner])], key="d_opp1")
+                right2 = st.selectbox("Gegner 2", [n for n in name_to_id.keys() if name_to_id[n] not in (me, name_to_id[partner], name_to_id[right1])], key="d_opp2")
+                c1, c2 = st.columns(2)
+                s_a = c1.number_input("Eure Punkte", min_value=0, step=1, value=11, key="d_s_a")
+                s_b = c2.number_input("Gegner Punkte", min_value=0, step=1, value=8, key="d_s_b")
+                if st.button("✅", key="btn_send_double_me"):
+                    # Direktes Insert mit fertigem Payload
+                    payload = {
+                        "datum": _utc_iso(pd.Timestamp.now(tz=TZ)),
+                        "a1": me, "a2": name_to_id[partner], "b1": name_to_id[right1], "b2": name_to_id[right2],
+                        "punktea": int(s_a), "punkteb": int(s_b),
+                        "confa": False, "confb": False,
+                    }
+                    if table_has_creator("pending_doubles"):
+                        payload["creator"] = me
+                    sp.table("pending_doubles").insert(payload).execute()
+                    clear_table_cache()
+                    st.success("Doppel erstellt. Ein Teilnehmer muss bestätigen.")
+                    st.rerun()
+            else:
+                a1 = st.selectbox("Spieler A1", [n for n in name_to_id.keys()], key="d_a1")
+                a2 = st.selectbox("Spieler A2", [n for n in name_to_id.keys() if n != a1], key="d_a2")
+                b1 = st.selectbox("Spieler B1", [n for n in name_to_id.keys() if n not in (a1, a2)], key="d_b1")
+                b2 = st.selectbox("Spieler B2", [n for n in name_to_id.keys() if n not in (a1, a2, b1)], key="d_b2")
+                c1, c2 = st.columns(2)
+                s_a = c1.number_input("Punkte Team A", min_value=0, step=1, value=11, key="d2_s_a")
+                s_b = c2.number_input("Punkte Team B", min_value=0, step=1, value=8, key="d2_s_b")
+                if st.button("✅", key="btn_send_double_others"):
+                    payload = {
+                        "datum": _utc_iso(pd.Timestamp.now(tz=TZ)),
+                        "a1": name_to_id[a1], "a2": name_to_id[a2], "b1": name_to_id[b1], "b2": name_to_id[b2],
+                        "punktea": int(s_a), "punkteb": int(s_b),
+                        "confa": False, "confb": False,
+                    }
+                    if table_has_creator("pending_doubles"):
+                        payload["creator"] = me
+                    sp.table("pending_doubles").insert(payload).execute()
+                    clear_table_cache()
+                    st.success("Doppel erstellt. Ein Teilnehmer muss bestätigen.")
+                    st.rerun()
+
+        # Rundlauf
+        with m_tabs[2]:
+            play_myself_r = st.checkbox("Ich spiele mit", value=True, key="round_play_myself")
+            selectable = list(name_to_id.keys())
+            default_sel = []
+            if play_myself_r and st.session_state.get("player_name") in selectable:
+                default_sel = [st.session_state.get("player_name")]
+            selected = st.multiselect("Teilnehmer wählen", selectable, default=default_sel, help="Wähle alle Teilnehmer (inkl. dir selbst, falls du mitspielst).", key="round_multi")
+            if len(selected) >= 2:
+                c1, c2 = st.columns(2)
+                # Eingabereihenfolge getauscht: erst 2., dann 1. (Sieger)
+                second_name = c1.selectbox("Zweiter", selected, key="round_second")
+                winner_candidate = [n for n in selected if n != second_name]
+                winner_name = c2.selectbox("Sieger", winner_candidate, key="round_winner")
+            else:
+                winner_name, second_name = None, None
+            if st.button("✅", key="btn_send_round"):
+                pids = [name_to_id[n] for n in selected]
+                if len(pids) < 2:
+                    st.warning("Mindestens 2 Teilnehmer.")
+                elif not winner_name or not second_name:
+                    st.warning("Bitte Sieger und Zweiten wählen.")
+                else:
+                    create_pending_round(
+                        me,
+                        pids,
+                        fin1_id=name_to_id[winner_name],
+                        fin2_id=name_to_id[second_name],
+                        winner_id=name_to_id[winner_name],
+                    )
+                    clear_table_cache()
+                    st.success("Rundlauf erstellt (mit Sieger/Zweiter). Ein Teilnehmer muss bestätigen.")
+                    st.rerun()
+
+        st.divider()
+
+        # --- Bestätigen (ich bin Teilnehmer, nicht Ersteller) ---
+        col_head, col_btn = st.columns([8,1])  # heading wide, button stays tiny – fits better on mobile
+        with col_head:
+            st.markdown("### Offene Bestätigungen")
+        with col_btn:
+            if st.button("🔄", key="btn_refresh_confirmations"):
+                clear_table_cache()
                 st.rerun()
-            if r_cancel.button("Abbrechen", key="round_cancel"):
-                _open_modal("")
-                st.rerun()
+                # Refresh nur für die Pending-Listen
+        pm = load_table("pending_matches")
+        pdbl = load_table("pending_doubles")
+        pr = load_table("pending_rounds")
 
-    # --- Modal: Offene Matches bestätigen ----------------------------------
-    if st.session_state.show_confirm_modal:
-        with ui_container("Offene Matches bestätigen"):
-            st.write("### Einzel")
-            for idx, row in pending.iterrows():
-                needs_me = (
-                    (row["A"] == current_player and not row["confA"])
-                    or (row["B"] == current_player and not row["confB"])
+        # --- Meine offenen Bestätigungen sammeln (pro Modus) ---
+        info_rows_s, info_rows_d, info_rows_r = [], [], []
+        # Einzel
+        if not pm.empty:
+            has_c = table_has_creator("pending_matches")
+            if has_c:
+                my_conf_s = pm[(pm["a"].astype(str).eq(str(me)) | pm["b"].astype(str).eq(str(me))) & (pm["creator"].astype(str) != str(me))]
+            else:
+                my_conf_s = pm[pm["b"].astype(str) == str(me)]
+            for _, r in my_conf_s.iterrows():
+                info_rows_s.append(r)
+        # Doppel
+        if not pdbl.empty:
+            has_c_d = table_has_creator("pending_doubles")
+            if has_c_d:
+                part_mask = (pdbl[["a1","a2","b1","b2"]].astype(str) == str(me)).any(axis=1)
+                my_conf_d = pdbl[part_mask & (pdbl["creator"].astype(str) != str(me))]
+            else:
+                my_conf_d = pdbl[(pdbl["a1"].astype(str) != str(me)) & ((pdbl["a2"].astype(str) == str(me)) | (pdbl["b1"].astype(str) == str(me)) | (pdbl["b2"].astype(str) == str(me)))]
+            for _, r in my_conf_d.iterrows():
+                info_rows_d.append(r)
+        # Rundlauf
+        if not pr.empty:
+            has_c_r = table_has_creator("pending_rounds")
+            if has_c_r:
+                def _involved_not_creator(row):
+                    teiln = [x for x in str(row.get("teilnehmer","")) .split(";") if x]
+                    return (str(me) in teiln) and (str(row.get("creator")) != str(me))
+                my_conf_r = pr[pr.apply(_involved_not_creator, axis=1)]
+            else:
+                def _is_involved_not_creator(row):
+                    teiln = [x for x in str(row.get("teilnehmer","")) .split(";") if x]
+                    return (str(me) in teiln) and (len(teiln) > 0 and teiln[0] != str(me))
+                my_conf_r = pr[pr.apply(_is_involved_not_creator, axis=1)]
+            for _, r in my_conf_r.iterrows():
+                info_rows_r.append(r)
+
+        # --- Global: Alle bestätigen (unter dem Refresh-Button) ---
+        if any([info_rows_s, info_rows_d, info_rows_r]):
+            if st.button("✅ Alle bestätigen", key="btn_accept_all_pending", type="primary"):
+                try:
+                    # Einzel
+                    for r in info_rows_s:
+                        confirm_pending_single(r)
+                    # Doppel
+                    for r in info_rows_d:
+                        confirm_pending_double(r)
+                    # Rundlauf
+                    for r in info_rows_r:
+                        confirm_pending_round(r)
+                    clear_table_cache()
+                    st.success("Alle bestätigbaren Spiele bestätigt.")
+                    st.rerun()
+                except Exception:
+                    clear_table_cache()
+                    st.warning("Massenbestätigung teilweise fehlgeschlagen. Seite neu laden und prüfen.")
+        else:
+            st.info("Keine offenen Bestätigungen.")
+
+        # --- Karten-Ansicht der einzelnen Spiele (nur Ablehnen pro Karte) ---
+        # Einzel-Karten
+        me_name = user.get("name")
+        for r in info_rows_s:
+            render_single_vs_card(
+                r, id_to_name,
+                highlight_name=me_name,
+                key=f"trej_s_{r['id']}",
+                on_reject=lambda rid: (reject_pending("pending_matches", rid), clear_table_cache(), st.rerun()),
+                button_label="❌ Ablehnen",
+            )
+
+        # Doppel-Karten
+        me_name = user.get("name")
+        for r in info_rows_d:
+            render_double_vs_card(
+                r, id_to_name,
+                highlight_name=me_name,
+                key=f"trej_d_{r['id']}",
+                on_reject=lambda rid: (reject_pending("pending_doubles", rid), clear_table_cache(), st.rerun()),
+                button_label="❌ Ablehnen",
+            )
+
+        # Rundlauf-Karten
+        me_name = user.get("name")
+        for r in info_rows_r:
+            render_round_vs_card(
+                r, id_to_name,
+                highlight_name=me_name,
+                key=f"trej_r_{r['id']}",
+                on_reject=lambda rid: (reject_pending("pending_rounds", rid), clear_table_cache(), st.rerun()),
+                button_label="❌ Ablehnen",
+            )
+
+        # --- Von mir erstellt (ich kann abbrechen) ---
+        st.markdown("### Ausstehende Bestätigungen")
+        if not pm.empty:
+            if table_has_creator("pending_matches"):
+                mine = pm[pm["creator"].astype(str) == str(me)]
+            else:
+                mine = pm[pm["a"].astype(str) == str(me)]
+            me_name = user.get("name")
+            for _, r in mine.iterrows():
+                render_single_vs_card(
+                    r, id_to_name,
+                    highlight_name=me_name,
+                    key=f"cancel_s_{r['id']}",
+                    on_reject=lambda rid: (reject_pending("pending_matches", rid), clear_table_cache(), st.rerun()),
+                    button_label="❌ Ablehnen",
                 )
-                if not needs_me:
-                    continue
-                col1, col_ok, col_rej = st.columns([3, 1, 1])
-                col1.write(f"{row['A']} {int(row['PunkteA'])} : {int(row['PunkteB'])} {row['B']}")
-                if col_ok.button("✅", key=f"conf_single_{idx}"):
-                    # Mark confirmation
-                    if row["A"] == current_player:
-                        pending.at[idx, "confA"] = True
-                    else:
-                        pending.at[idx, "confB"] = True
-                    # When both have confirmed, move to matches and update Elo incrementally
-                    if pending.at[idx, "confA"] and pending.at[idx, "confB"]:
-                        row = pending.loc[idx].copy()
-                        # Fallback: wenn Datum fehlt, neu setzen
-                        if pd.isna(row["Datum"]):
-                            row["Datum"] = datetime.now(ZoneInfo("Europe/Berlin"))
-                        # Add to confirmed matches
-                        matches.loc[len(matches)] = row[pending.columns[:-2]]
-                        pending.drop(idx, inplace=True)
-                        save_csv(matches, MATCHES)
-                        # Incremental Elo-Update for this match
-                        a, b = row["A"], row["B"]
-                        pa, pb = int(row["PunkteA"]), int(row["PunkteB"])
-                        ra = players.loc[players.Name == a, "ELO"].iat[0]
-                        rb = players.loc[players.Name == b, "ELO"].iat[0]
-                        margin = abs(pa - pb)
-                        k_eff = 32 * (1 + margin / 11)
-                        score_a = 1 if pa > pb else 0
-                        # Calculate new ratings
-                        new_ra = calc_elo(ra, rb, score_a, k_eff)
-                        new_rb = calc_elo(rb, ra, 1 - score_a, k_eff)
-                        # Win/loss counts
-                        win_a = 1 if pa > pb else 0
-                        win_b = 1 - win_a
-                        # Update player stats
-                        players.loc[players.Name == a, ["ELO", "Siege", "Niederlagen", "Spiele"]] = [
-                            new_ra,
-                            players.loc[players.Name == a, "Siege"].iat[0] + win_a,
-                            players.loc[players.Name == a, "Niederlagen"].iat[0] + win_b,
-                            players.loc[players.Name == a, "Spiele"].iat[0] + 1,
-                        ]
-                        players.loc[players.Name == b, ["ELO", "Siege", "Niederlagen", "Spiele"]] = [
-                            new_rb,
-                            players.loc[players.Name == b, "Siege"].iat[0] + win_b,
-                            players.loc[players.Name == b, "Niederlagen"].iat[0] + win_a,
-                            players.loc[players.Name == b, "Spiele"].iat[0] + 1,
-                        ]
-                        save_csv(players, PLAYERS)
-                    # Always save pending and show confirmation
-                    save_csv(pending, PENDING)
-                    st.success("Bestätigt.")
-                    st.rerun()
-                if col_rej.button("❌", key=f"rej_single_{idx}"):
-                    pending.drop(idx, inplace=True)
-                    save_csv(pending, PENDING)
-                    st.warning("Match abgelehnt und entfernt.")
-                    st.rerun()
 
-            st.write("### Doppel")
-            for idx, row in pending_d.iterrows():
-                in_team_a = current_player in (row["A1"], row["A2"])
-                in_team_b = current_player in (row["B1"], row["B2"])
-                if not (in_team_a or in_team_b):
-                    continue
-                needs_me = (
-                    (in_team_a and not row["confA"])
-                    or (in_team_b and not row["confB"])
+        if not pdbl.empty:
+            if table_has_creator("pending_doubles"):
+                mine = pdbl[pdbl["creator"].astype(str) == str(me)]
+            else:
+                mine = pdbl[pdbl["a1"].astype(str) == str(me)]
+            me_name = user.get("name")
+            for _, r in mine.iterrows():
+                render_double_vs_card(
+                    r, id_to_name,
+                    highlight_name=me_name,
+                    key=f"cancel_d_{r['id']}",
+                    on_reject=lambda rid: (reject_pending("pending_doubles", rid), clear_table_cache(), st.rerun()),
+                    button_label="❌ Ablehnen",
                 )
-                if not needs_me:
-                    continue
-                col1, col_ok, col_rej = st.columns([3, 1, 1])
-                teams = (
-                    f"{row['A1']} / {row['A2']}  {int(row['PunkteA'])} : "
-                    f"{int(row['PunkteB'])}  {row['B1']} / {row['B2']}"
+
+        if not pr.empty:
+            if table_has_creator("pending_rounds"):
+                mine = pr[pr["creator"].astype(str) == str(me)]
+            else:
+                def _created_by_me(row):
+                    teiln = [x for x in str(row.get("teilnehmer","")) .split(";") if x]
+                    return len(teiln) > 0 and teiln[0] == str(me)
+                mine = pr[pr.apply(_created_by_me, axis=1)]
+            me_name = user.get("name")
+            for _, r in mine.iterrows():
+                render_round_vs_card(
+                    r, id_to_name,
+                    highlight_name=me_name,
+                    key=f"cancel_r_{r['id']}",
+                    on_reject=lambda rid: (reject_pending("pending_rounds", rid), clear_table_cache(), st.rerun()),
+                    button_label="❌ Ablehnen",
                 )
-                col1.write(teams)
-                if col_ok.button("✅", key=f"conf_double_{idx}"):
-                    # Markiere Bestätigung
-                    if in_team_a:
-                        pending_d.at[idx, "confA"] = True
-                    else:
-                        pending_d.at[idx, "confB"] = True
-                    # Wenn beide Teams bestätigt haben, zum finalen DataFrame verschieben
-                    if pending_d.at[idx, "confA"] and pending_d.at[idx, "confB"]:
-                        row = pending_d.loc[idx].copy()
-                        # Fallback: wenn Datum fehlt, neu setzen
-                        if pd.isna(row["Datum"]):
-                            row["Datum"] = datetime.now(ZoneInfo("Europe/Berlin"))
-                        # Bestätigte Doppel in die Hauptliste
-                        doubles.loc[len(doubles)] = row[pending_d.columns[:-2]]
-                        pending_d.drop(idx, inplace=True)
-                        save_csv(doubles, DOUBLES)
-                        # Inkrementelle Doppel-ELO-Updates
-                        a1, a2, b1, b2 = row["A1"], row["A2"], row["B1"], row["B2"]
-                        pA, pB = int(row["PunkteA"]), int(row["PunkteB"])
-                        # Aktuelle Team-Elo-Werte
-                        r1 = players.loc[players.Name==a1,"D_ELO"].iat[0]
-                        r2 = players.loc[players.Name==a2,"D_ELO"].iat[0]
-                        r3 = players.loc[players.Name==b1,"D_ELO"].iat[0]
-                        r4 = players.loc[players.Name==b2,"D_ELO"].iat[0]
-                        # Durchschnittswerte und K-Faktor
-                        avg_op = (r3 + r4) / 2
-                        margin = abs(pA - pB)
-                        k_eff = 24 * (1 + margin / 11)
-                        score_a = 1 if pA > pB else 0
-                        nr1, nr2 = calc_doppel_elo(r1, r2, avg_op, score_a, k_eff)
-                        nr3, nr4 = calc_doppel_elo(r3, r4, (r1 + r2) / 2, 1 - score_a, k_eff)
-                        # Statistiken und Elo schreiben
-                        for p, new, s in [(a1, nr1, score_a), (a2, nr2, score_a),
-                                           (b1, nr3, 1 - score_a), (b2, nr4, 1 - score_a)]:
-                            players.loc[players.Name==p, ["D_ELO","D_Siege","D_Niederlagen","D_Spiele"]] = [
-                                new,
-                                players.loc[players.Name==p,"D_Siege"].iat[0] + (1 if s > 0 else 0),
-                                players.loc[players.Name==p,"D_Niederlagen"].iat[0] + (1 if s == 0 else 0),
-                                players.loc[players.Name==p,"D_Spiele"].iat[0] + 1,
-                            ]
-                        save_csv(players, PLAYERS)
-                    # Save pending always
-                    save_csv(pending_d, PENDING_D)
-                    st.success("Bestätigt.")
-                    st.rerun()
-                if col_rej.button("❌", key=f"rej_double_{idx}"):
-                    pending_d.drop(idx, inplace=True)
-                    save_csv(pending_d, PENDING_D)
-                    st.warning("Doppel abgelehnt und entfernt.")
-                    st.rerun()
 
-            st.write("### Rundlauf")
-            for idx, row in pending_r.iterrows():
-                teilnehmer = row["Teilnehmer"].split(";")
-                if current_player not in teilnehmer:
-                    continue
-                confirmed = set(row["confirmed_by"].split(";")) if row["confirmed_by"] else set()
-                if current_player in confirmed:
-                    continue
-                col1, col_ok, col_rej = st.columns([3, 1, 1])
-                col1.write(f"{', '.join(teilnehmer)}  –  Sieger: {row['Sieger']}")
-                if col_ok.button("✅", key=f"conf_round_{idx}"):
-                    # Bestätigung hinzufügen
-                    confirmed.add(current_player)
-                    pending_r.at[idx, "confirmed_by"] = ";".join(sorted(confirmed))
-                    save_csv(pending_r, PENDING_R)
-                    # Erst bei 3 Bestätigungen Spiel in Rundenliste verschieben
-                    if len(confirmed) >= 3:
-                        row = pending_r.loc[idx].copy()
-                        # Fallback: wenn Datum fehlt, neu setzen
-                        if pd.isna(row["Datum"]):
-                            row["Datum"] = datetime.now(ZoneInfo("Europe/Berlin"))
-                        rounds.loc[len(rounds)] = row[pending_r.columns[:-1]]
-                        pending_r.drop(idx, inplace=True)
-                        save_csv(rounds, ROUNDS)
-                        # Inkrementelle Rundlauf-ELO-Updates
-                        teilnehmer = row["Teilnehmer"].split(";")
-                        fin1, fin2, winner = row["Finalist1"], row["Finalist2"], row["Sieger"]
-                        k = 48
-                        avg = players.loc[players.Name.isin(teilnehmer), "R_ELO"].mean()
-                        deltas = {}
-                        for p in teilnehmer:
-                            old = players.loc[players.Name==p,"R_ELO"].iat[0]
-                            if p == winner:
-                                s = 1
-                                players.loc[players.Name==p,"R_Siege"] += 1
-                            elif p in (fin1, fin2):
-                                s = 0.5
-                                players.loc[players.Name==p,"R_Zweite"] += 1
-                            else:
-                                s = 0
-                                players.loc[players.Name==p,"R_Niederlagen"] += 1
-                            exp = 1 / (1 + 10 ** ((avg - old) / 400))
-                            deltas[p] = k * (s - exp)
-                        # Offset für Null-Summe
-                        offset = sum(deltas.values()) / len(deltas)
-                        for p, delta in deltas.items():
-                            new = round(players.loc[players.Name==p,"R_ELO"].iat[0] + (delta - offset))
-                            players.loc[players.Name==p,"R_ELO"] = new
-                            players.loc[players.Name==p,"R_Spiele"] += 1
-                        save_csv(players, PLAYERS)
-                    st.success("Bestätigt.")
-                    st.rerun()
-                if col_rej.button("❌", key=f"rej_round_{idx}"):
-                    pending_r.drop(idx, inplace=True)
-                    save_csv(pending_r, PENDING_R)
-                    st.warning("Rundlauf abgelehnt und entfernt.")
-                    st.rerun()
+    # Account – mit Logout‑Button
+    with tabs[2]:
+        st.subheader("Account")
+        st.write(f"Angemeldet als **{user.get('name','Unbekannt')}**")
 
-            if st.button("❌ Schließen"):
-                _open_modal("")
-                st.rerun()
+        # --- Profil: Name ändern ---
+        st.markdown("### Profil")
+        with st.form("form_change_name"):
+            new_name = st.text_input("Neuer Anzeigename", value=user.get("name", ""))
+            save_name = st.form_submit_button("Name speichern", type="primary")
+        if save_name:
+            nn = (new_name or "").strip()
+            if not nn:
+                st.warning("Bitte einen gültigen Namen eingeben.")
+            else:
+                # Duplikate ignorieren Groß/Kleinschreibung & Leerzeichen
+                try:
+                    rows = sp.table("players").select("id,name").execute().data or []
+                except Exception:
+                    rows = []
+                def _norm(s: str) -> str:
+                    return "".join(str(s or "").split()).lower()
+                me_id = str(user.get("id"))
+                if any(_norm(r.get("name")) == _norm(nn) and str(r.get("id")) != me_id for r in rows):
+                    st.error("Name bereits vergeben (Groß-/Kleinschreibung & Leerzeichen ignoriert).")
+                else:
+                    try:
+                        sp.table("players").update({"name": nn}).eq("id", me_id).execute()
+                        # Caches leeren & Session aktualisieren
+                        try:
+                            load_table.clear()
+                        except Exception:
+                            pass
+                        try:
+                            get_player_maps.clear()
+                        except Exception:
+                            pass
+                        st.session_state.player_name = nn
+                        st.success("Name aktualisiert.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Konnte Namen nicht speichern: {e}")
 
-    st.stop()
+        # --- Sicherheit: PIN ändern ---
+        st.markdown("### Sicherheit")
+        with st.form("form_change_pin"):
+            old_pin = st.text_input("Aktuelle PIN", type="password")
+            new_pin1 = st.text_input("Neue PIN (4-stellig)", type="password")
+            new_pin2 = st.text_input("Neue PIN bestätigen", type="password")
+            save_pin = st.form_submit_button("PIN speichern", type="primary")
+        if save_pin:
+            cur_stored = str(user.get("pin", ""))
+            if not old_pin or not new_pin1 or not new_pin2:
+                st.warning("Bitte alle Felder ausfüllen.")
+            elif not check_pin(old_pin, cur_stored):
+                st.error("Aktuelle PIN ist falsch.")
+            elif new_pin1 != new_pin2:
+                st.error("Neue PINs stimmen nicht überein.")
+            elif len(new_pin1) != 4 or not new_pin1.isdigit():
+                st.warning("Die neue PIN muss 4 Ziffern haben.")
+            else:
+                try:
+                    hp = hash_pin(new_pin1)
+                    sp.table("players").update({"pin": hp}).eq("id", user.get("id")).execute()
+                    st.success("PIN aktualisiert.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Konnte PIN nicht speichern: {e}")
+
+        # Logout bleibt am Ende
+        if st.button("Logout", key="btn_logout_account", type="primary"):
+            try:
+                sp.table("players").update({"auto_token": None}).eq("id", user.get("id")).execute()
+            except Exception:
+                pass
+            for k in ("logged_in","player_id","player_name"):
+                st.session_state.pop(k, None)
+            st.query_params.clear()
+            st.rerun()
 
 # endregion
 
- # region Regel Ansicht
-if st.session_state.view_mode == "regeln":
-    rules_html = """
-    <style>
-    .rulebox {
-      font-size: 18px;
-      line-height: 1.45;
-      padding: 1rem;
-      border-radius: 8px;
-      background-color: rgba(255,255,255,0.9);
-      color: #000;
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
-      border: 1px solid rgba(0, 0, 0, 0.1);
-    }
-    .rulebox h2 {
-      font-size: 24px;
-      margin: 1.2em 0 0.5em;
-    }
-    .rulebox h3 {
-      font-size: 20px;
-      margin: 1em 0 0.3em;
-    }
-    .rulebox ul {
-      margin: 0 0 1em 1.3em;
-      list-style: disc;
-    }
-    @media (prefers-color-scheme: dark) {
-      .rulebox {
-        background-color: rgba(33,33,33,0.85);
-        color: #fff;
-        box-shadow: 0 2px 6px rgba(255, 255, 255, 0.15);
-        border: 1px solid #ffffff !important;
-      }
-    }
-    </style>
-
-    <div class="rulebox">
-
-    <h2>Einzelmatch</h2>
-
-    <h3>1.&nbsp;Spielziel:</h3>
-    <p>Wer zuerst 11&nbsp;Punkte (mit mindestens&nbsp;2 Punkten Vorsprung) erreicht, gewinnt das Match.</p>
-
-    <h3>2.&nbsp;Aufschlag&nbsp;&amp;&nbsp;Rückschlag:</h3>
-    <p>
-    Der Aufschlag beginnt offen (sichtbar) und wird vom eigenen Spielfeld auf das gegnerische Feld gespielt.<br>
-    Der Ball muss dabei einmal auf der eigenen Seite und dann einmal auf der gegnerischen Seite aufkommen.<br>
-    Nach dem Aufschlag erfolgt der Rückschlag: Der Ball wird direkt auf die gegnerische Seite geschlagen
-    (nicht mehr auf der eigenen aufkommen lassen).
-    </p>
-
-    <h3>3.&nbsp;Rallye:</h3>
-    <p>
-    Nach dem Aufschlag wechseln sich die Spieler ab.<br>
-    Der Ball darf maximal einmal aufspringen, muss über oder um das Netz geschlagen werden.<br>
-    Berührt der Ball das Netz beim Rückschlag, aber landet korrekt, wird weitergespielt.<br>
-    Beim Aufschlag hingegen führt Netzberührung bei korrektem Verlauf zu einem „Let“ (Wiederholung des Aufschlags).
-    </p>
-
-    <h3>4.&nbsp;Punktevergabe:</h3>
-    <ul>
-      <li>Aufschlagfehler (z.&nbsp;B. Ball landet nicht auf gegnerischer Seite)</li>
-      <li>Ball verfehlt</li>
-      <li>Ball springt zweimal auf der eigenen Seite</li>
-      <li>Rückschlag landet außerhalb oder im Netz</li>
-      <li>Ball wird vor dem Aufspringen, aber über der Tischfläche getroffen</li>
-      <li>Netz oder Tisch wird mit der Hand oder dem Körper berührt</li>
-    </ul>
-
-    <h3>5.&nbsp;Aufschlagwechsel:</h3>
-    <p>
-    Alle&nbsp;2 Punkte wird der Aufschlag gewechselt.<br>
-    Bei 10&nbsp;:&nbsp;10 wird nach jedem Punkt der Aufschlag gewechselt
-    (bis einer 2&nbsp;Punkte Vorsprung hat).
-    </p>
-
-    <h3>6.&nbsp;Seitenwechsel:</h3>
-    <p>
-    Nach jedem Satz werden die Seiten gewechselt.<br>
-    Im Entscheidungssatz (z.&nbsp;B. 5.&nbsp;Satz bei 3&nbsp;:&nbsp;2) zusätzlich bei 5 Punkten.
-    </p>
-
-    </div>
-
-    <div class="rulebox">
-
-    <h2>Doppelmatch</h2>
-
-    <h3>1.&nbsp;Spielziel:</h3>
-    <p>Wie beim Einzel gilt: 11&nbsp;Punkte mit mindestens 2 Punkten Vorsprung.</p>
-
-    <h3>2.&nbsp;Aufschlag&nbsp;&amp;&nbsp;Rückschlag:</h3>
-    <p>
-    Aufschlag erfolgt immer diagonal von der rechten Hälfte zur rechten Hälfte des Gegners.<br>
-    Reihenfolge: A1 schlägt auf B1 auf, dann B1 auf A2, dann A2 auf B2, dann B2 auf A1 usw.
-    </p>
-
-    <h3>3.&nbsp;Schlagreihenfolge:</h3>
-    <p>
-    Innerhalb eines Ballwechsels muss sich jedes Team beim Schlagen abwechseln.<br>
-    Es darf also nicht zweimal hintereinander vom selben Spieler eines Teams gespielt werden.
-    </p>
-
-    <h3>4.&nbsp;Punktevergabe:</h3>
-    <p>Fehler führen wie im Einzelspiel zu einem Punkt für das gegnerische Team:</p>
-    <ul>
-      <li>Aufschlagfehler (z.&nbsp;B. falsches Feld, Netz)</li>
-      <li>Ball ins Aus oder ins Netz</li>
-      <li>Fehlerhafte Reihenfolge beim Schlagen</li>
-      <li>Berührung von Netz oder Tisch mit dem Körper</li>
-    </ul>
-
-    <h3>5.&nbsp;Aufschlagwechsel:</h3>
-    <p>
-    Der Aufschlag wechselt alle 2 Punkte – dabei ändert sich auch die Reihenfolge der Spieler.<br>
-    Nach jedem Satz rotiert die Reihenfolge, sodass jeder mal mit jedem spielt.
-    </p>
-
-    <h3>6.&nbsp;Seitenwechsel:</h3>
-    <p>Wie im Einzel: Nach jedem Satz und bei 5 Punkten im letzten Satz.</p>
-
-    </div>
-
-    <div class="rulebox">
-
-    <h2>Rundlauf</h2>
-
-    <h3>1.&nbsp;Spielprinzip:</h3>
-    <p>
-    Alle Spieler laufen im Kreis um den Tisch. Jeder darf nur einen Schlag ausführen und muss danach sofort weiterlaufen.<br>
-    Wer einen Fehler macht, verliert ein Leben.
-    </p>
-
-    <h3>2.&nbsp;Leben &amp; Ausscheiden:</h3>
-    <p>
-    Jeder Spieler startet mit <strong>3 Leben</strong>. Wer keine Leben mehr hat, scheidet aus.<br>
-    Der erste Spieler, der ausscheidet, bekommt automatisch einen <strong>„Schwimmer“</strong> (ein zusätzliches Leben) und darf wieder mitspielen.
-    </p>
-
-    <h3>3.&nbsp;Finalrunde:</h3>
-    <p>
-    Wenn nur noch zwei Spieler übrig sind, beginnt das <strong>Finale</strong>.<br>
-    Es wird auf Punkte gespielt: <strong>Bis 3 Punkte mit mindestens 2 Punkten Abstand</strong>.
-    </p>
-
-    <h3>4.&nbsp;Aufschlag im Finale:</h3>
-    <p>
-    Im Finale wechselt der Aufschlag nach jedem Punkt. Es wird ganz normal mit einem regulären Aufschlag begonnen.
-    </p>
-
-    <h3>5.&nbsp;Fehlerquellen:</h3>
-    <ul>
-      <li>Ball im Netz oder im Aus</li>
-      <li>Ball springt nicht auf gegnerischer Seite</li>
-      <li>Doppelberührung oder Schlag vor dem Aufspringen</li>
-      <li>Zu spät am Tisch (wenn Ball schon 2× aufspringt oder Mitspieler warten muss)</li>
-    </ul>
-
-    </div>
-    """
-    st.markdown(rules_html, unsafe_allow_html=True)
+# region auth_section
+# Login/Registrierung als eigenes Fenster. Wenn nicht eingeloggt, zeigen wir NUR dieses Fenster
+# und stoppen danach das Rendering der restlichen Seite.
+if not st.session_state.get("logged_in"):
+    # Versuche, die gesamte Login/Registrierung in einen echten Streamlit-Container mit Rahmen zu legen
+    try:
+        with st.container(border=True):
+            st.markdown('<div class="auth-title">🔐 Login & Registrierung</div>', unsafe_allow_html=True)
+            login_register_ui()
+    except TypeError:
+        # Fallback für ältere Streamlit-Versionen ohne `border=True`
+        st.markdown(
+            """
+            <style>
+            .auth-card { max-width: 520px; margin: 6vh auto; padding: 1.0rem 1.0rem 0.75rem; border: 1px solid rgba(255,255,255,0.20); border-radius: 12px; background: rgba(0,0,0,0.25); box-shadow: 0 8px 28px rgba(0,0,0,.35); }
+            .auth-title { text-align:center; font-size: 1.1rem; margin: 0.25rem 0 0.75rem; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown('<div class="auth-card"><div class="auth-title">🔐 Login & Registrierung</div>', unsafe_allow_html=True)
+        login_register_ui()
+        st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
-# endregion
-
-# region Turniermodus Ansicht
-if st.session_state.view_mode == "turniermodus":
-    st.markdown(
-        '<h1 style="text-align:center; margin-bottom:0.25rem;">🏆 Turnier</h1>',
-        unsafe_allow_html=True
-    )
-    st.write("🚧 In Arbeit 🚧")
-    st.stop()
+else:
+    logged_in_ui()
 # endregion
